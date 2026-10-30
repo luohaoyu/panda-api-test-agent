@@ -1,0 +1,64 @@
+panda-ai-api-tester/SKILL.md
+  h_e9ab747020676c 1-178
+panda-ai-api-tester/references/assertion-rules.md
+  h_e9ab747020676c 1-26
+panda-ai-api-tester/references/case-design-rules.md
+  h_e9ab747020676c 1-35
+panda-ai-api-tester/references/data-fixture-rules.md
+  h_e9ab747020676c 1-30
+panda-ai-api-tester/references/report-spec.md
+  h_e9ab747020676c 1-54
+panda-ai-api-tester/references/test-package-spec.md
+  h_e9ab747020676c 1-245
+panda-ai-api-tester/references/test-result-spec.md
+  h_e9ab747020676c 1-180
+panda-ai-api-tester/scripts/promote.py
+  h_e9ab747020676c 1-57
+panda-ai-api-tester/scripts/render_report.py
+  h_e9ab747020676c 1-533
+panda-ai-api-tester/scripts/run_pipeline.py
+  h_e9ab747020676c 1-36
+panda-ai-api-tester/scripts/run_tests.sh
+  h_e9ab747020676c 1-19
+panda-ai-api-tester/scripts/runner.py
+  h_e9ab747020676c 1-1327
+panda-ai-api-tester/scripts/validate_result.py
+  h_e9ab747020676c 1-576
+panda-ai-api-tester/templates/api_client.py.tpl
+  h_e9ab747020676c 1-58
+panda-ai-api-tester/templates/conftest.py.tpl
+  h_e9ab747020676c 1-109
+panda-ai-api-tester/templates/pytest_api_case.py.tpl
+  h_e9ab747020676c 1-30
+panda-ai-api-tester/templates/pytest_chain_case.py.tpl
+  h_e9ab747020676c 1-40
+panda-ai-api-tester/templates/pytest_package_adapter.py.tpl
+  h_e9ab747020676c 1-17
+panda-ai-api-tester/tests/test_cleanup_waiver.py
+  h_e9ab747020676c 1-298
+panda-api-test-agent/SKILL.md
+  h_e9ab747020676c 1-137
+panda-api-test-agent/references/interaction-rules.md
+  h_e9ab747020676c 1-280
+panda-api-test-agent/references/orchestration-rules.md
+  h_e9ab747020676c 1-205
+panda-l1-adapter-generator/SKILL.md
+  h_e9ab747020676c 1-131
+panda-l1-adapter-generator/references/config-template.md
+  h_e9ab747020676c 1-128
+panda-l1-adapter-generator/references/profile-template.md
+  h_e9ab747020676c 1-54
+panda-l1-adapter-generator/references/scan-mapping.md
+  h_e9ab747020676c 1-55
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9d20f14c3329bbfc5d30ebfeb41fdf8f08d0020f",
+  "prompts": {},
+  "humans": {
+    "h_e9ab747020676c": {
+      "author": "罗豪宇 <zt000886@zt.com>"
+    }
+  }
+}
