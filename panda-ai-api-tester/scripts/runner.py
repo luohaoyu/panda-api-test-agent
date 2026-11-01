@@ -2,7 +2,6 @@
 import argparse
 import hashlib
 import json
-import os
 import re
 import sys
 import time
@@ -14,6 +13,11 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
+from plan_fingerprint import calculate_plan_fingerprint
+from validate_review import validate_review
+from progress import ProgressWriter
+from runtime_context import RuntimeContext, RuntimeContextError, auth_config, auth_probe_gate, auth_probe_operation, auth_probe_strategy, binding_spec, package_binding_keys, package_execution_preflight, preflight
+
 
 SUPPORTED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 SENSITIVE_KEYS = {
@@ -24,6 +28,15 @@ PRODUCTION_HOST_HINTS = {"prod", "production", "live"}
 WRITE_METHODS = {"POST", "PUT", "PATCH"}
 DESTRUCTIVE_METHODS = {"DELETE"}
 VARIABLE_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_.-]*)\}")
+TEST_CONFIG_BLOCK_PATTERN = re.compile(r"```yaml\s+test-config\s*\n(?P<body>[\s\S]*?)\n```", re.IGNORECASE)
+PROFILE_GOVERNANCE_BLOCK_PATTERN = re.compile(
+    r"```yaml\s+interface-profile-governance\s*\n(?P<body>[\s\S]*?)\n```",
+    re.IGNORECASE,
+)
+SHA256_PATTERN = re.compile(r"sha256:[0-9a-fA-F]{64}")
+PROFILE_LIFECYCLES = {
+    "discovered", "drafted", "minimally_usable", "confirmed", "executable", "drifted", "reconfirm_required", "retired",
+}
 
 
 def parse_iso8601_with_timezone(value, field_name):
@@ -82,6 +95,98 @@ def now_iso():
 
 def sha256_bytes(value):
     return hashlib.sha256(value).hexdigest()
+
+
+def load_test_config_identity(path):
+    config_path = Path(path).resolve()
+    if not config_path.is_file():
+        raise RunnerError(f"test config not found: {config_path}")
+    raw = config_path.read_text(encoding="utf-8")
+    blocks = list(TEST_CONFIG_BLOCK_PATTERN.finditer(raw))
+    if len(blocks) != 1:
+        raise RunnerError("TEST_CONFIG_SCHEMA_UNSUPPORTED: test-config.md requires exactly one yaml test-config block")
+    body = blocks[0].group("body")
+    schema = re.search(r"(?m)^\s*schema_version:\s*[\"']?([^\"'\s#]+)", body)
+    project = re.search(r"(?m)^\s*project_id:\s*[\"']?([^\"'\s#]+)", body)
+    revision = re.search(r"(?m)^\s*config_revision:\s*(\d+)\s*(?:#.*)?$", body)
+    environments = re.search(r"(?m)^environments:\s*$", body)
+    if not schema or schema.group(1) != "2.1" or not project or not revision or int(revision.group(1)) < 1 or not environments:
+        raise RunnerError("TEST_CONFIG_SCHEMA_UNSUPPORTED: only project-level multi-environment Schema 2.1 is supported")
+    return {
+        "path": str(config_path),
+        "schema_version": schema.group(1),
+        "project_id": project.group(1),
+        "config_revision": int(revision.group(1)),
+        "fingerprint": "sha256:" + hashlib.sha256(config_path.read_bytes()).hexdigest(),
+    }
+
+
+def _governance_scalar(body, field, required=True):
+    match = re.search(rf"(?m)^\s*{re.escape(field)}:\s*[\"']?([^\"'\n#]+?)[\"']?\s*(?:#.*)?$", body)
+    if not match:
+        if required:
+            raise RunnerError(f"interface profile governance missing {field}")
+        return None
+    return match.group(1).strip()
+
+
+def _normalized_profile_document(raw):
+    return re.sub(
+        r"(?m)^(\s*(?:document_fingerprint|contract_fingerprint):\s*)sha256:[0-9a-fA-F]{64}(\s*(?:#.*)?)$",
+        r"\1sha256:<normalized>\2",
+        raw,
+    )
+
+
+def load_interface_profile_identity(path):
+    profile_path = Path(path).resolve()
+    if not profile_path.is_file():
+        raise RunnerError(f"contract profile not found: {profile_path}")
+    raw = profile_path.read_text(encoding="utf-8")
+    blocks = list(PROFILE_GOVERNANCE_BLOCK_PATTERN.finditer(raw))
+    if len(blocks) != 1:
+        raise RunnerError("INTERFACE_PROFILE_GOVERNANCE_UNSUPPORTED: profile requires exactly one yaml interface-profile-governance block")
+    body = blocks[0].group("body")
+    schema_version = _governance_scalar(body, "schema_version")
+    profile_id = _governance_scalar(body, "profile_id")
+    revision_raw = _governance_scalar(body, "profile_revision")
+    code_baseline = _governance_scalar(body, "code_baseline")
+    lifecycle = _governance_scalar(body, "lifecycle")
+    document_fingerprint = _governance_scalar(body, "document_fingerprint")
+    contract_fingerprint = _governance_scalar(body, "contract_fingerprint")
+    try:
+        profile_revision = int(revision_raw)
+    except (TypeError, ValueError) as exc:
+        raise RunnerError("interface profile profile_revision must be a positive integer") from exc
+    if schema_version != "1.0" or profile_revision < 1:
+        raise RunnerError("INTERFACE_PROFILE_GOVERNANCE_UNSUPPORTED: schema_version=1.0 and positive profile_revision are required")
+    if lifecycle not in PROFILE_LIFECYCLES:
+        raise RunnerError("interface profile lifecycle is invalid")
+    if not SHA256_PATTERN.fullmatch(document_fingerprint or "") or not SHA256_PATTERN.fullmatch(contract_fingerprint or ""):
+        raise RunnerError("interface profile requires document_fingerprint and contract_fingerprint sha256 values")
+    actual_document_fingerprint = "sha256:" + hashlib.sha256(
+        _normalized_profile_document(raw).encode("utf-8")
+    ).hexdigest()
+    if actual_document_fingerprint.lower() != document_fingerprint.lower():
+        raise RunnerError("interface profile document_fingerprint mismatch")
+    owners_block = re.search(r"(?ms)^owners:\s*\n(?P<body>(?:^[ \t]+[^\n]+\n?)+)", body)
+    if not owners_block:
+        raise RunnerError("interface profile governance requires owners")
+    owner_body = owners_block.group("body")
+    for owner_field in ("code_owner", "business_owner", "test_owner"):
+        owner = _governance_scalar(owner_body, owner_field)
+        if not owner or owner.lower() in {"pending", "unknown", "待确认"}:
+            raise RunnerError(f"interface profile governance requires confirmed {owner_field}")
+    return {
+        "profile_path": str(profile_path),
+        "governance_schema_version": schema_version,
+        "profile_id": profile_id,
+        "profile_revision": profile_revision,
+        "code_baseline": code_baseline,
+        "lifecycle": lifecycle,
+        "document_fingerprint": document_fingerprint,
+        "contract_fingerprint": contract_fingerprint,
+    }
 
 
 def slug(value):
@@ -157,16 +262,6 @@ def json_path_get(document, path):
                 raise KeyError(path)
             current = current[position]
     return current
-
-
-def collect_sensitive_env_values():
-    values = []
-    for key, value in os.environ.items():
-        canonical = canonical_key(key)
-        sensitive_name = canonical in SENSITIVE_KEYS or any(canonical.endswith(marker) for marker in SENSITIVE_KEYS)
-        if value and len(value) >= 8 and sensitive_name:
-            values.append(value)
-    return values
 
 
 def redact_json_paths(document, paths):
@@ -247,21 +342,26 @@ class RunnerError(Exception):
 
 
 class VariableResolver:
-    def __init__(self, initial=None, allowed_env=None):
+    def __init__(self, initial=None, allowed_bindings=None, runtime_context=None):
         self.values = dict(initial or {})
-        self.allowed_env = set(allowed_env or [])
+        self.allowed_bindings = set(allowed_bindings or [])
+        self.runtime_context = runtime_context
+        if runtime_context is None:
+            raise RunnerError("explicit RuntimeContext is required")
 
     def set(self, name, value):
+        if name in self.runtime_context.values:
+            raise RunnerError(f"runtime binding is read-only: {name}")
         self.values[name] = value
 
     def get(self, name):
         if name in self.values:
             return self.values[name]
-        if name in self.allowed_env:
-            value = os.environ.get(name)
-            if value is None:
-                raise RunnerError(f"required environment variable is missing: {name}")
-            return value
+        if name in self.allowed_bindings:
+            try:
+                return self.runtime_context.require(name)
+            except RuntimeContextError as exc:
+                raise RunnerError(str(exc)) from exc
         raise RunnerError(f"unknown or unauthorized variable: {name}")
 
     def resolve(self, value):
@@ -289,12 +389,80 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def auth_binding_names(config):
+    if not isinstance(config, dict):
+        return set()
+    auth_type = str(config.get("type", "none")).strip().lower()
+    if auth_type == "basic":
+        return {item.get("key") for item in (config.get("username"), config.get("password")) if isinstance(item, dict) and item.get("key")}
+    if auth_type == "headers":
+        return {item.get("key") for item in (config.get("headers") or {}).values() if isinstance(item, dict) and item.get("key")}
+    credential = config.get("credential")
+    return {credential.get("key")} if isinstance(credential, dict) and credential.get("key") else set()
+
+
+class AuthInjector:
+    """Build deterministic request authentication from runtime-only variables."""
+
+    def __init__(self, package, resolver):
+        self.config = auth_config(package)
+        self.resolver = resolver
+
+    @property
+    def required_bindings(self):
+        return auth_binding_names(self.config)
+
+    def headers(self):
+        config = self.config
+        if not isinstance(config, dict) or config.get("enabled", True) is False:
+            return {}
+        auth_type = str(config.get("type", "none")).strip().lower()
+        if auth_type in {"", "none", "anonymous"}:
+            return {}
+
+        configured_headers = config.get("headers") or {}
+        if auth_type == "headers":
+            return {str(name): str(self.resolver.get(spec["key"])).strip() for name, spec in configured_headers.items()}
+
+        header = config.get("header")
+        if auth_type == "basic":
+            username_key = config["username"]["key"]
+            password_key = config["password"]["key"]
+            username = str(self.resolver.get(username_key)).strip()
+            password = str(self.resolver.get(password_key)).strip()
+            import base64
+            encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+            return {str(header or "Authorization"): f"Basic {encoded}"}
+
+        credential_key = config["credential"]["key"]
+        credential = self.resolver.get(credential_key)
+        if config.get("trim", True) and isinstance(credential, str):
+            credential = credential.strip()
+        template = config.get("value_template")
+        if template is None:
+            template = {
+                "bearer": "Bearer ${" + credential_key + "}",
+                "token": "${" + credential_key + "}",
+                "header": "${" + credential_key + "}",
+                "cookie": "${" + credential_key + "}",
+            }.get(auth_type)
+        if not isinstance(template, str) or not template:
+            raise RunnerError(f"unsupported or incomplete auth type: {auth_type}")
+        if template == "${" + credential_key + "}":
+            value = str(credential)
+        else:
+            value = str(self.resolver.resolve(template))
+        default_header = "Cookie" if auth_type == "cookie" else "Authorization"
+        return {str(header or default_header): value}
+
+
 class HttpExecutor:
-    def __init__(self, base_url, timeout=10.0, max_response_bytes=1024 * 1024):
+    def __init__(self, base_url, timeout=10.0, max_response_bytes=1024 * 1024, auth_provider=None):
         self.base_url = base_url.rstrip("/")
         self.timeout = float(timeout)
         self.max_response_bytes = int(max_response_bytes)
         self.allowed_origin = self._origin(self.base_url)
+        self.auth_provider = auth_provider
 
     @staticmethod
     def _origin(url):
@@ -315,6 +483,13 @@ class HttpExecutor:
         if query:
             url += "?" + urllib.parse.urlencode(query, doseq=True)
         headers = {str(key): str(value) for key, value in (request_spec.get("headers") or {}).items()}
+        if self.auth_provider:
+            injected = self.auth_provider.headers()
+            existing = {key.lower(): key for key in headers}
+            for key, value in injected.items():
+                # Explicit case-insensitive request headers win over defaults.
+                if key.lower() not in existing:
+                    headers[key] = value
         body = None
         if "json" in request_spec:
             body = json.dumps(request_spec["json"], ensure_ascii=False).encode("utf-8")
@@ -613,12 +788,14 @@ class TeardownManager:
 
 
 class GateExecutor:
-    def __init__(self, package, base_url, resolver, http_executor, evidence_writer):
+    def __init__(self, package, base_url, resolver, http_executor, evidence_writer, runtime_context=None):
         self.package = package
         self.base_url = base_url
         self.resolver = resolver
         self.http = http_executor
         self.evidence = evidence_writer
+        self.runtime_context = runtime_context
+        self.auth_probe_gate_id = (auth_probe_gate(package) or {}).get("gate_id") if auth_probe_strategy(package) == "declared" else None
 
     def execute(self):
         results = [self._environment_gate(), self._auth_gate(), self._cleanup_gate()]
@@ -628,8 +805,18 @@ class GateExecutor:
         if not custom_gates:
             results.append(self._gate_result("GATE-RUNTIME", "运行时可达性", "failed", "test_case", "at least one executable runtime gate is required"))
             return results
+        if self.auth_probe_gate_id and not any(gate.get("gate_id") == self.auth_probe_gate_id for gate in custom_gates):
+            results.append(self._gate_result("GATE-AUTH-PROBE", "认证探测", "failed", "environment", f"declared auth probe gate is missing: {self.auth_probe_gate_id}"))
+            return results
+        # The authentication probe must run before any other runtime gate so an
+        # unverified credential can never reach business cases.
+        custom_gates.sort(key=lambda gate: 0 if gate.get("gate_id") == self.auth_probe_gate_id else 1)
         for gate in custom_gates:
-            results.append(self._custom_gate(gate))
+            result = self._custom_gate(gate)
+            if self.auth_probe_gate_id and gate.get("gate_id") == self.auth_probe_gate_id:
+                result["role"] = "auth_probe"
+                result["operation"] = auth_probe_operation(gate)
+            results.append(result)
         return results
 
     def _environment_gate(self):
@@ -638,10 +825,11 @@ class GateExecutor:
         production = bool((self.package.get("environment") or {}).get("production", False))
         host_tokens = set(re.split(r"[.\-_]", (parsed.hostname or "").lower()))
         origin = self._origin(parsed)
-        allowed_origins_env = (self.package.get("environment") or {}).get("allowed_origins_env")
+        allowed_origins_binding = binding_spec(self.package, "allowed_origins")
+        allowed_origins_value = self.runtime_context.optional(allowed_origins_binding["key"], "") if allowed_origins_binding else ""
         allowed_origins = {
-            item.strip().rstrip("/") for item in os.environ.get(allowed_origins_env, "").split(",") if item.strip()
-        } if allowed_origins_env else set()
+            item.strip().rstrip("/") for item in str(allowed_origins_value).split(",") if item.strip()
+        } if allowed_origins_binding else set()
         local_host = (parsed.hostname or "").lower() in {"127.0.0.1", "localhost", "::1"}
         safe = (
             parsed.scheme in {"http", "https"}
@@ -665,19 +853,22 @@ class GateExecutor:
 
     def _auth_gate(self):
         gate_id = "GATE-AUTH"
-        auth_env = (self.package.get("environment") or {}).get("auth_env") or []
-        missing = [name for name in auth_env if not os.environ.get(name)]
-        actual = "required auth variables available" if not missing else "missing auth variables: " + ", ".join(missing)
+        auth_bindings = auth_binding_names(auth_config(self.package))
+        missing = [name for name in sorted(auth_bindings) if not self.runtime_context.has(name)]
+        if not auth_bindings:
+            actual = "no credential required"
+        elif missing:
+            actual = "missing auth bindings: " + ", ".join(missing)
+        else:
+            actual = "credential bindings provided (presence only; validity requires an auth probe)"
         return self._gate_result(gate_id, "鉴权变量", "passed" if not missing else "failed", "environment", actual)
 
     def _cleanup_gate(self):
         gate_id = "GATE-CLEANUP"
-        write_cases = [case for case in self.package.get("cases", []) if case.get("side_effect") in {"write", "destructive"}]
-        missing = [case.get("case_id") for case in write_cases if not case.get("teardown") and not case.get("cleanup_waiver")]
+        write_cases = [case for case in self.package.get("cases", []) if case.get("side_effect") in {"write_attempt", "write", "destructive"}]
+        missing = [case.get("case_id") for case in write_cases if case.get("side_effect") == "write" and not case.get("teardown") and not case.get("cleanup_waiver")]
         destructive = [case.get("case_id") for case in write_cases if case.get("side_effect") == "destructive" and not case.get("destructive_confirmed")]
         waived = [case.get("cleanup_waiver", {}).get("waiver_id") for case in write_cases if case.get("cleanup_waiver")]
-        if missing:
-            return self._gate_result(gate_id, "清理能力", "failed", "test_case", "missing teardown: " + ", ".join(missing))
         if destructive:
             return self._gate_result(gate_id, "清理能力", "failed", "test_case", "destructive action not confirmed: " + ", ".join(destructive))
         actual = "write cleanup requirements satisfied"
@@ -733,39 +924,46 @@ class ResultWriter:
 
 
 class ApiTestRunner:
-    def __init__(self, package, run_dir):
+    def __init__(self, package, run_dir, runtime_context):
         self.package = package
         self.run_dir = Path(run_dir).resolve()
         self.environment = package.get("environment") or {}
-        self.allowed_env = set(self.environment.get("auth_env") or [])
-        base_url_env = self.environment.get("base_url_env")
-        allowed_origins_env = self.environment.get("allowed_origins_env")
-        read_only_operations_env = self.environment.get("read_only_operations_env")
-        if allowed_origins_env:
-            self.allowed_env.add(allowed_origins_env)
-        if read_only_operations_env:
-            self.allowed_env.add(read_only_operations_env)
-        if base_url_env:
-            self.allowed_env.add(base_url_env)
-            self.base_url = os.environ.get(base_url_env, "")
-        else:
-            self.base_url = self.environment.get("base_url", "")
+        execution_errors = package_execution_preflight(package)
+        if execution_errors:
+            raise RunnerError("package execution preflight blocked: " + "; ".join(execution_errors))
+        if runtime_context is None:
+            raise RunnerError("explicit RuntimeContext is required")
+        self.runtime_context = runtime_context
+        context_errors = preflight(package, runtime_context)
+        if context_errors:
+            raise RunnerError("runtime preflight blocked: " + "; ".join(context_errors))
+        self.allowed_bindings = package_binding_keys(package)
+        base_url_binding = binding_spec(package, "base_url")
+        self.base_url = str(runtime_context.require(base_url_binding["key"]))
         initial = {"run_id": f"run-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"}
-        self.resolver = VariableResolver(initial, self.allowed_env)
-        secrets = [os.environ.get(name) for name in (self.environment.get("auth_env") or []) if os.environ.get(name)] + collect_sensitive_env_values()
-        self.http = HttpExecutor(self.base_url, self.environment.get("timeout_seconds", 10), self.environment.get("max_response_bytes", 1024 * 1024))
+        self.resolver = VariableResolver(initial, self.allowed_bindings, runtime_context)
+        self.auth = AuthInjector(package, self.resolver)
+        secrets = runtime_context.redaction_values()
+        self.http = HttpExecutor(self.base_url, self.environment.get("timeout_seconds", 10), self.environment.get("max_response_bytes", 1024 * 1024), self.auth)
         self.evidence = EvidenceWriter(self.run_dir, secrets)
         self.teardown = TeardownManager(self.resolver, self.http, self.evidence)
         self.fixtures = FixtureManager(self.resolver, self.http, self.evidence, self.teardown)
         self.assertions = AssertionEngine()
         self.result_writer = ResultWriter(self.run_dir, secrets)
         self.write_attempt_risks = []
+        self.residual_risks = []
+        self.plan_fingerprint = None
+        self.review = self.package.get("review") or {}
+        plan = self.package.get("plan") or {}
+        self.progress = ProgressWriter(self.run_dir, self.resolver.get("run_id"), len(self.package.get("cases") or []), plan.get("plan_id"))
 
     def run(self):
         started_at = now_iso()
         run_id = self.resolver.get("run_id")
+        self.progress.update("initializing", "validate", "校验测试包")
         self._validate_package()
-        gate_results = GateExecutor(self.package, self.base_url, self.resolver, self.http, self.evidence).execute()
+        self.progress.update("gate_running", "gates", "环境与鉴权门禁")
+        gate_results = GateExecutor(self.package, self.base_url, self.resolver, self.http, self.evidence, self.runtime_context).execute()
         case_results = []
         fixture_records = []
         cleanup = {"status": "not_required", "pending_objects": [], "waived_cases": []}
@@ -775,8 +973,10 @@ class ApiTestRunner:
         if failed_gates:
             failed_ids = [gate["gate_id"] for gate in failed_gates]
             case_results = [self._not_run_case(case, failed_ids, "自动门禁未通过") for case in self.package.get("cases", [])]
+            self.progress.update("blocked", "gates", "门禁阻断", blocked_cases=len(case_results), completed_cases=len(case_results), completed=len(case_results))
         else:
             try:
+                self.progress.update("fixture_running", "fixtures", "前置数据准备")
                 fixture_records = self.fixtures.prepare(self.package.get("fixtures") or [])
                 if fixture_records:
                     gate_results.append({"gate_id": "GATE-FIXTURES", "name": "测试夹具", "status": "passed", "classification": "test_case", "actual": f"prepared {len(fixture_records)} fixture(s)", "evidence_refs": [item["evidence_ref"] for item in fixture_records if item.get("evidence_ref")]})
@@ -789,6 +989,7 @@ class ApiTestRunner:
             if not case_results:
                 case_results = self._run_cases()
                 cleanup = self.teardown.execute_all()
+                self.progress.update("cleanup_running", "cleanup", "清理测试副作用", completed_cases=len(case_results), completed=len(case_results))
 
         waived_cases = self._waived_cleanup_cases(case_results)
         if waived_cases:
@@ -807,50 +1008,123 @@ class ApiTestRunner:
                 "waived_cases": cleanup.get("waived_cases", []),
                 "details": "至少一个 write_attempt 未满足预期拒绝；只读 verification 已执行，仍需人工核对副作用风险。",
             }
+        if self.residual_risks:
+            cleanup.setdefault("pending_objects", []).extend(deepcopy(self.residual_risks))
+            cleanup["details"] = (cleanup.get("details") or "") + " 存在已登记但未自动清理的普通非生产测试残留；不得将结果描述为完整清理通过。"
+            if cleanup.get("status") == "not_required":
+                cleanup["status"] = "not_run"
         requirement_trace = self._build_requirement_trace(case_results)
+        coverage = self._build_coverage(requirement_trace, case_results)
         verdict = self._verdict(gate_results, case_results, cleanup, requirement_trace)
         execution_trace = self._build_execution_trace(gate_results, fixture_records, case_results, cleanup, verdict)
+        summary = {
+            "total": len(case_results),
+            "passed": sum(1 for item in case_results if item.get("status") == "passed"),
+            "failed": sum(1 for item in case_results if item.get("status") == "failed"),
+            "errors": sum(1 for item in case_results if item.get("status") == "error"),
+            "skipped": sum(1 for item in case_results if item.get("status") == "skipped"),
+            "not_run": sum(1 for item in case_results if item.get("status") == "not_run"),
+        }
+        summary["executed"] = summary["passed"] + summary["failed"] + summary["errors"]
+        self.progress.update("validating", "validate_result", "校验运行结果", completed_cases=len(case_results), completed=len(case_results))
         result = {
             "schema_version": "1.1",
             "run_id": run_id,
             "package_id": self.package.get("package_id"),
             "mode": self.package.get("mode"),
+            "plan": {"plan_fingerprint": self.plan_fingerprint, "title": (self.package.get("plan") or {}).get("title") or self.package.get("title")},
+            "review": {key: value for key, value in self.review.items() if key not in {"comment", "findings"}},
             "contract": self.package.get("contract") or {},
+            "test_config": self.package.get("test_config") or {},
             "project": redact(self.package.get("project") or {}, secrets=self.evidence.secrets),
-            "environment": {"environment_id": self.environment.get("environment_id", "unknown"), "base_url": redact_url(self.base_url), "production": bool(self.environment.get("production", False))},
+            "environment": {"environment_id": self.environment.get("environment_id", "unknown"), "base_url": redact_url(self.base_url), "production": bool(self.environment.get("production", False)), "runtime_status": self._environment_runtime_status(gate_results), "runtime_context": self.runtime_context.metadata()},
             "started_at": started_at,
             "finished_at": now_iso(),
             "gate_results": gate_results,
             "fixture_results": fixture_records,
             "case_results": case_results,
             "requirement_trace": requirement_trace,
+            "coverage": coverage,
             "execution_trace": execution_trace,
             "cleanup": cleanup,
             "known_gaps": known_gaps,
+            "summary": summary,
             "verdict": verdict,
         }
-        return self.result_writer.write(result)
+        result_path = self.result_writer.write(result)
+        self.progress.update("completed", "completed", "运行完成", completed_cases=len(case_results), completed=len(case_results), current_case_id=None, current_case_title=None)
+        return result_path
+
+    @staticmethod
+    def _environment_runtime_status(gate_results):
+        """Authentication is only 'verified' when an executable auth probe passed."""
+        status = {"http": "unknown", "auth": "unknown"}
+        credential_gate_passed = None
+        for gate in gate_results:
+            gate_id = gate.get("gate_id")
+            gate_status = gate.get("status")
+            if gate_id == "GATE-ENV-SAFETY":
+                status["http"] = "verified" if gate_status == "passed" else "unavailable"
+            elif gate.get("role") == "auth_probe":
+                status["auth"] = "verified" if gate_status == "passed" else "authentication_failed"
+            elif gate_id == "GATE-AUTH":
+                credential_gate_passed = gate_status == "passed"
+        if status["auth"] == "unknown":
+            status["auth"] = "declared_only" if credential_gate_passed else "authentication_failed"
+            if status["auth"] == "declared_only":
+                status["auth_detail"] = "credential presence confirmed; no auth probe executed"
+        return status
 
     def _validate_package(self):
-        required = ["schema_version", "package_id", "project", "mode", "contract", "environment", "risk", "cases"]
+        required = ["schema_version", "package_id", "project", "test_config", "mode", "contract", "environment", "risk", "cases"]
         missing = [field for field in required if field not in self.package]
         if missing:
             raise RunnerError("package missing required fields: " + ", ".join(missing))
+        if self.package.get("schema_version") != "2.1":
+            raise RunnerError("package schema_version must be 2.1")
         if self.package.get("mode") not in {"PROBE", "EXECUTE"}:
             raise RunnerError("runner executes only PROBE or EXECUTE packages")
+        self.plan_fingerprint = calculate_plan_fingerprint(self.package)
+        config_ref = self.package.get("test_config") or {}
+        required_config = ("path", "schema_version", "config_revision", "environment_id", "fingerprint")
+        missing_config = [field for field in required_config if config_ref.get(field) in (None, "")]
+        if missing_config:
+            raise RunnerError("test_config missing required fields: " + ", ".join(missing_config))
+        if config_ref.get("schema_version") != "2.1" or not isinstance(config_ref.get("config_revision"), int) or config_ref.get("config_revision") < 1:
+            raise RunnerError("TEST_CONFIG_SCHEMA_UNSUPPORTED: test_config must reference Schema 2.1 with positive config_revision")
+        if config_ref.get("environment_id") != self.environment.get("environment_id"):
+            raise RunnerError("test_config.environment_id must match environment.environment_id")
+        if not SHA256_PATTERN.fullmatch(str(config_ref.get("fingerprint", ""))):
+            raise RunnerError("test_config.fingerprint must be sha256:<64 hex>")
+        config_identity = load_test_config_identity(config_ref.get("path"))
+        for field in ("schema_version", "config_revision", "fingerprint"):
+            if str(config_identity.get(field)).lower() != str(config_ref.get(field)).lower():
+                raise RunnerError(f"test config {field} mismatch")
+        project_id = (self.package.get("project") or {}).get("workspace_id")
+        if project_id and config_identity.get("project_id") != project_id:
+            raise RunnerError("test config project_id does not match package project.workspace_id")
         contract = self.package.get("contract") or {}
-        profile_path = contract.get("profile_path")
-        fingerprint = contract.get("fingerprint", "")
-        if contract.get("lifecycle") != "executable" or not profile_path or not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", fingerprint):
-            raise RunnerError("contract requires lifecycle=executable, profile_path and sha256 fingerprint")
-        profile = Path(profile_path).resolve()
-        if not profile.is_file():
-            raise RunnerError(f"contract profile not found: {profile}")
-        actual_fingerprint = "sha256:" + hashlib.sha256(profile.read_bytes()).hexdigest()
-        if actual_fingerprint.lower() != fingerprint.lower():
-            raise RunnerError("contract fingerprint mismatch")
+        required_contract = (
+            "profile_path", "governance_schema_version", "profile_id", "profile_revision",
+            "code_baseline", "lifecycle", "document_fingerprint", "contract_fingerprint",
+        )
+        missing_contract = [field for field in required_contract if contract.get(field) in (None, "")]
+        if missing_contract:
+            raise RunnerError("contract missing required interface profile identity fields: " + ", ".join(missing_contract))
+        allowed_execution_lifecycles = {"minimally_usable", "confirmed", "executable"}
+        if contract.get("lifecycle") not in allowed_execution_lifecycles:
+            raise RunnerError("contract lifecycle must be minimally_usable, confirmed, or executable for EXECUTE")
+        profile_identity = load_interface_profile_identity(contract.get("profile_path"))
+        for field in required_contract[1:]:
+            if str(profile_identity.get(field)).lower() != str(contract.get(field)).lower():
+                raise RunnerError(f"interface profile {field} mismatch")
+        if profile_identity.get("lifecycle") not in allowed_execution_lifecycles:
+            raise RunnerError("interface profile lifecycle does not allow EXECUTE")
         if not isinstance(self.package.get("cases"), list) or not self.package["cases"]:
             raise RunnerError("package requires at least one case")
+        review_errors = validate_review(self.package, require_execute=self.package.get("mode") == "EXECUTE")
+        if review_errors:
+            raise RunnerError("; ".join(review_errors))
         risk = self.package.get("risk") or {}
         if any(case.get("cleanup_waiver") for case in self.package["cases"]) and risk.get("cleanup_waiver_enabled") is not True:
             raise RunnerError("risk.cleanup_waiver_enabled=true is required when cleanup_waiver is used")
@@ -860,10 +1134,11 @@ class ApiTestRunner:
         if any(not item for item in case_ids) or len(case_ids) != len(set(case_ids)):
             raise RunnerError("case_id values must be non-empty and unique")
         self._validate_traceability()
-        read_only_operations_env = self.environment.get("read_only_operations_env")
+        read_only_binding = binding_spec(self.package, "read_only_operations")
+        read_only_value = self.runtime_context.optional(read_only_binding["key"], "") if read_only_binding else ""
         allowed_read_only = {
-            item.strip() for item in os.environ.get(read_only_operations_env, "").split(",") if item.strip()
-        } if read_only_operations_env else set()
+            item.strip() for item in str(read_only_value).split(",") if item.strip()
+        } if read_only_binding else set()
         known = set(case_ids)
         dependencies = {}
         for case in self.package["cases"]:
@@ -946,10 +1221,18 @@ class ApiTestRunner:
                 if not body_contains_tag(request, waiver.get("data_tag")):
                     raise RunnerError(f"case {case_id} request body must contain cleanup_waiver.data_tag")
             if effective_effect in {"write", "destructive"} and waiver is None:
-                for field in ("cleanup_extract", "object_ref", "teardown"):
-                    if not case.get(field):
-                        raise RunnerError(f"case {case_id} {effective_effect} request requires {field}")
-                self._validate_teardown(case_id, case.get("teardown"))
+                if effective_effect == "destructive":
+                    for field in ("cleanup_extract", "object_ref", "teardown"):
+                        if not case.get(field):
+                            raise RunnerError(f"case {case_id} destructive request requires {field}")
+                    self._validate_teardown(case_id, case.get("teardown"))
+                elif case.get("teardown"):
+                    for field in ("cleanup_extract", "object_ref"):
+                        if not case.get(field):
+                            raise RunnerError(f"case {case_id} write request with teardown requires {field}")
+                    self._validate_teardown(case_id, case.get("teardown"))
+                elif not case.get("object_ref"):
+                    raise RunnerError(f"case {case_id} write request without teardown requires object_ref for residual tracking")
             if effective_effect == "destructive" and case.get("destructive_confirmed") is not True:
                 raise RunnerError(f"case {case_id} destructive request requires destructive_confirmed=true")
         pending = set(dependencies)
@@ -1058,6 +1341,8 @@ class ApiTestRunner:
                 raise RunnerError("case dependency graph contains a cycle")
             for case_id in ready:
                 case = cases[case_id]
+                self.progress.update("case_running", "execute_cases", "业务用例执行", current_case_id=case_id, current_case_title=case.get("name", case_id))
+                case_started = time.monotonic()
                 dependencies = case.get("depends_on") or []
                 blocked = [item for item in dependencies if results[item]["status"] != "passed"]
                 if blocked:
@@ -1068,6 +1353,7 @@ class ApiTestRunner:
                     result = self._run_case(case)
                 results[case_id] = result
                 ordered.append(result)
+                self.progress.record_case(result.get("status"), time.monotonic() - case_started, case_id, case.get("name", case_id))
                 pending.remove(case_id)
         return ordered
 
@@ -1088,13 +1374,16 @@ class ApiTestRunner:
             step("resolve_request", "passed", method=request.get("method", "GET"), path=request.get("path", ""))
             action = None
             waiver = case.get("cleanup_waiver")
-            if case.get("side_effect") in {"write", "destructive"} and waiver is None:
+            if case.get("side_effect") in {"write", "destructive"} and waiver is None and case.get("teardown"):
                 action = self.teardown.register(
                     case_id, case.get("teardown"), case.get("object_ref"), case.get("cleanup_extract") or {}
                 )
                 step("register_teardown", "passed")
             exchange = self.http.execute(request)
             request_sent = True
+            if case.get("side_effect") == "write" and waiver is None and not case.get("teardown"):
+                self.residual_risks.append({"case_id": case_id, "object_ref": redact(case.get("object_ref"), secrets=self.evidence.secrets), "reason": "普通非生产写入未配置 teardown；残留对象需人工处置。", "risk": "accepted_pending_cleanup"})
+                step("register_residual_risk", "passed", object_ref=case.get("object_ref"), reason="no teardown configured")
             if action is not None:
                 self.teardown.bind_response(action, exchange.get("response_json"))
                 step("bind_cleanup_variables", "passed" if not action.get("cleanup_error") else "failed", variables=sorted((case.get("cleanup_extract") or {}).keys()))
@@ -1263,6 +1552,25 @@ class ApiTestRunner:
         }
 
     @staticmethod
+    def _build_coverage(requirement_trace, case_results):
+        requirements = requirement_trace.get("requirements") or []
+        total = len(requirements)
+        touched = sum(1 for item in requirements if item.get("status") in {"passed", "failed", "error", "inconclusive"})
+        complete = sum(1 for item in requirements if item.get("status") in {"passed", "failed", "error"})
+        passed = sum(1 for item in requirements if item.get("status") == "passed")
+        def rate(numerator):
+            return {"numerator": numerator, "denominator": total, "percent": round(numerator / total * 100, 1) if total else None}
+        executed = sum(1 for item in case_results if item.get("status") in {"passed", "failed", "error"})
+        planned = len(case_results)
+        return {
+            "design": rate(sum(1 for item in requirements if item.get("business_rule_refs"))),
+            "execution_touch": rate(touched),
+            "complete_scenario": rate(complete),
+            "acceptance_pass": rate(passed),
+            "case_execution": {"numerator": executed, "denominator": planned, "percent": round(executed / planned * 100, 1) if planned else None},
+        }
+
+    @staticmethod
     def _build_execution_trace(gates, fixtures, cases, cleanup, verdict):
         steps = []
 
@@ -1300,7 +1608,7 @@ class ApiTestRunner:
             return "failed"
         if "not_run" in statuses or "skipped" in statuses or (requirement_trace.get("summary") or {}).get("required_complete") is not True:
             return "partial"
-        if cleanup.get("waived_cases"):
+        if cleanup.get("waived_cases") or cleanup.get("pending_objects"):
             return "inconclusive"
         if statuses and all(status == "passed" for status in statuses) and cleanup.get("status") not in {"failed", "not_run", "waived"} and (requirement_trace.get("summary") or {}).get("required_complete") is True:
             return "passed"
@@ -1308,19 +1616,10 @@ class ApiTestRunner:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Execute a deterministic API TestPackage")
-    parser.add_argument("package", help="Path to package.json")
-    parser.add_argument("--output-dir", required=True, help="Run output directory")
-    args = parser.parse_args()
-    package_path = Path(args.package).resolve()
-    try:
-        package = json.loads(package_path.read_text(encoding="utf-8"))
-        result_path = ApiTestRunner(package, args.output_dir).run()
-        print(json.dumps({"status": "completed", "result": str(result_path)}, ensure_ascii=False))
-        return 0
-    except Exception as exc:
-        print(json.dumps({"status": "error", "error": redact(str(exc), secrets=collect_sensitive_env_values())}, ensure_ascii=False), file=sys.stderr)
-        return 1
+    parser = argparse.ArgumentParser(description="Runner is an in-process API only")
+    parser.parse_args()
+    print(json.dumps({"status": "blocked", "error": "runner.py requires an in-memory RuntimeContext; use the host Python API"}, ensure_ascii=False), file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

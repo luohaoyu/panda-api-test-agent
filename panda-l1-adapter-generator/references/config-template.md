@@ -1,128 +1,272 @@
-# `test-config.md` 模板
+# 项目接口测试配置模板（Schema 2.1）
 
-> 使用说明：以下模板用于生成 `docs/test-config.md` 初版。所有值都应注明来源（代码/文档/推断）；无法扫描到的内容填写“待确认”。环境变量只保留 `${VAR}` 形式，不写入真实凭据。数据库配置必须注明“只连测试库”。
+> 作用域：项目级。一个项目维护一份 `docs/test-config.md`，统一描述多套测试环境。禁止写入需求、分支、Commit、样本、用例、结果或真实凭据。
 
-## 1. 被测环境
+## 1. 机器配置块
 
-- `base_url`：`${BASE_URL}`
-  - 来源：待确认
-- `timeout`：`${HTTP_TIMEOUT_MS}`
-  - 来源：待确认
-- `proxy`：`${HTTP_PROXY}` 或“不使用”
-  - 来源：待确认
-- `gateway`：`${GATEWAY_URL}` 或“待确认”
-  - 来源：待确认
-- 环境用途：测试环境 / 待确认
-- 备注：初版配置不得直接指向生产环境。
+配置消费者必须读取下面唯一的 `yaml test-config` 代码块；其余文字仅用于说明。字段未知时使用 `drafted`、`unverified`、空数组或 `${VAR}`，禁止猜值。所有运行值只保存 binding key 与元数据，不保存实际值。
 
-## 2. 鉴权方式
+```yaml test-config
+metadata:
+  schema_version: "2.1"
+  project_id: ${PROJECT_ID}
+  config_revision: 1
+  status: drafted
+  created_at: ${CREATED_AT}
+  updated_at: ${UPDATED_AT}
+  change_reason: initial_discovery
+  owners:
+    primary: ${PROJECT_TEST_OWNER}
+    backup: ${PROJECT_BACKUP_OWNER}
 
-- `type`：bearer / cookie / api-key / sign / none / 待确认
-  - 来源：待确认
-- `login-flow`：
-  1. 登录入口：`待确认`
-  2. 请求参数：`待确认`
-  3. token 或会话取值字段：`待确认`
-  4. 注入位置：`Authorization` / Cookie / Header / 待确认
-  - 来源：待确认
-- `sign-config`：
-  - 算法：`待确认`
-  - canonical 规则：`待确认`
-  - 时间戳/nonce：`待确认`
-  - 密钥：`${SIGN_SECRET}`
-  - 来源：待确认
+project:
+  modules: []
+  api_prefix: ${API_PREFIX}
+  response_envelope: ${RESPONSE_ENVELOPE}
+  business_success_rule:
+    field: ${BUSINESS_CODE_FIELD}
+    expected: ${BUSINESS_SUCCESS_CODE}
 
-## 3. 数据源
+authentication:
+  type: bearer
+  header: Authorization
+  value_template: "Bearer ${TOKEN}"
+  probe:
+    method: GET
+    path: ${AUTH_PROBE_PATH}
 
-> **安全约束：数据库和缓存只连测试库。** 不写入生产连接信息或真实密码。
+environments:
+  ${ENVIRONMENT_ID}:
+    status: drafted
+    production: false
+    owner: ${ENVIRONMENT_OWNER}
 
-- `db.enabled`：`${ENABLE_DB_ASSERT}`
-- `db.type`：`待确认`
-- `db.host`：`${TEST_DB_HOST}`
-- `db.port`：`${TEST_DB_PORT}`
-- `db.database`：`${TEST_DB_NAME}`
-- `db.user`：`${TEST_DB_USER}`
-- `db.password`：`${TEST_DB_PASSWORD}`
-- `redis.enabled`：`${ENABLE_REDIS_ASSERT}`
-- `redis.host`：`${TEST_REDIS_HOST}`
-- `redis.port`：`${TEST_REDIS_PORT}`
-- `redis.db`：`${TEST_REDIS_DB}`
-- 来源：待确认
+    runtime_bindings:
+      base_url:
+        key: ${ENV_BASE_URL_KEY}
+        required: true
+        secret: false
+        format: url
+      allowed_origins:
+        key: ${ENV_ALLOWED_ORIGINS_KEY}
+        required: true
+        secret: false
+        format: origin_list
+      read_only_operations:
+        key: ${ENV_READ_ONLY_OPERATIONS_KEY}
+        required: false
+        secret: false
+        format: operation_list
+      auth:
+        type: bearer
+        header: Authorization
+        credential:
+          key: ${ENV_AUTH_KEY}
+          required: true
+          secret: true
+          format: string
 
-## 4. 链路定义
+    http:
+      timeout_seconds: 30
+      verify_tls: true
+      config_status: drafted
+      runtime_status: unknown
+      last_verified_at: null
+      evidence_ref: null
 
-### 4.1 单接口
+    db:
+      runtime_bindings:
+        enabled:
+          key: ${ENV_DB_ENABLED_KEY}
+          required: false
+          secret: false
+          format: string
+        host:
+          key: ${ENV_DB_HOST_KEY}
+          required: false
+          secret: false
+          format: string
+        port:
+          key: ${ENV_DB_PORT_KEY}
+          required: false
+          secret: false
+          format: string
+        database:
+          key: ${ENV_DB_NAME_KEY}
+          required: false
+          secret: false
+          format: string
+        username:
+          key: ${ENV_DB_USER_KEY}
+          required: false
+          secret: true
+          format: string
+        password:
+          key: ${ENV_DB_PASSWORD_KEY}
+          required: false
+          secret: true
+          format: string
+      driver: ${DB_DRIVER}
+      readonly: true
+      connect_timeout_seconds: 10
+      query_timeout_seconds: 10
+      allowed_schemas: []
+      config_status: drafted
+      runtime_status: unknown
 
-- 接口：`待确认`
-- 前置条件：`待确认`
-- 输入变量：`待确认`
-- 输出变量：`待确认`
+    redis:
+      runtime_bindings:
+        enabled:
+          key: ${ENV_REDIS_ENABLED_KEY}
+          required: false
+          secret: false
+          format: string
+        host:
+          key: ${ENV_REDIS_HOST_KEY}
+          required: false
+          secret: false
+          format: string
+        port:
+          key: ${ENV_REDIS_PORT_KEY}
+          required: false
+          secret: false
+          format: string
+        database:
+          key: ${ENV_REDIS_DB_KEY}
+          required: false
+          secret: false
+          format: string
+        username:
+          key: ${ENV_REDIS_USER_KEY}
+          required: false
+          secret: true
+          format: string
+        password:
+          key: ${ENV_REDIS_PASSWORD_KEY}
+          required: false
+          secret: true
+          format: string
+      mode: standalone
+      tls: false
+      readonly: true
+      allowed_key_prefixes: []
+      config_status: drafted
+      runtime_status: unknown
 
-### 4.2 多接口编排
+    mq:
+      runtime_bindings:
+        enabled:
+          key: ${ENV_MQ_ENABLED_KEY}
+          required: false
+          secret: false
+          format: string
+        profile:
+          key: ${ENV_MQ_PROFILE_KEY}
+          required: false
+          secret: true
+          format: string
+      readonly_observation: true
+      config_status: drafted
+      runtime_status: unknown
 
-- 链路名称：`待确认`
-- 步骤：`接口 A → 接口 B → 接口 C`（初版草稿）
-- 变量传递：`待确认`
-- 依赖关系来源：代码 / 文档 / 推断 / 待确认
+    config_center:
+      runtime_bindings:
+        enabled:
+          key: ${ENV_CONFIG_CENTER_ENABLED_KEY}
+          required: false
+          secret: false
+          format: string
+        profile:
+          key: ${ENV_CONFIG_PROFILE_KEY}
+          required: false
+          secret: true
+          format: string
+      readonly: true
+      config_status: drafted
+      runtime_status: unknown
 
-## 5. 测试数据规范
+    observability:
+      runtime_bindings:
+        log_query_url:
+          key: ${ENV_LOG_QUERY_URL_KEY}
+          required: false
+          secret: false
+          format: url
+        trace_query_url:
+          key: ${ENV_TRACE_QUERY_URL_KEY}
+          required: false
+          secret: false
+          format: url
+        operation_log_query_url:
+          key: ${ENV_OPERATION_LOG_QUERY_URL_KEY}
+          required: false
+          secret: false
+          format: url
+      default_polling:
+        interval_seconds: 5
+        timeout_seconds: 60
+      config_status: drafted
+      runtime_status: unknown
 
-- 数据标签：`tag=TEST`
-- 测试数据前缀：`test:`
-- teardown：优先清理本次生成的数据；清理方式待确认。
-- TTL：允许异步清理或缓存过期存在时间差；容忍窗口待确认。
-- 幂等策略：待确认。
-- 数据隔离范围：测试环境 / 待确认。
+safety:
+  production_execution: forbidden
+  cross_environment_resource_mix: forbidden
+  credentials_persistence: forbidden
+  runtime_value_sources: host_memory_only
+  request_header_logging: redacted
+  db_default_mode: readonly
+  redis_default_mode: readonly
+  write_retry: forbidden
+  destructive_operation: forbidden
 
-## 6. 断言规范
+pending_items: []
+```
 
-- HTTP 状态码：按接口画像记录；未识别时待确认。
-- 业务 `code`：按响应包装类、常量或枚举记录；未识别时待确认。
-- 关键字段：按接口画像记录；未识别时待确认。
-- 落库断言：仅在 `ENABLE_DB_ASSERT` 开启且确认只连测试库时执行。
-- 缓存一致性：仅在 `ENABLE_REDIS_ASSERT` 开启且确认只连测试库/测试缓存时执行。
-- 异步最终一致性：记录轮询条件、超时和容忍窗口；无法确认时待确认。
+## 2. Runtime Binding 规则
 
-## 7. 降级开关
+每个运行时绑定必须声明：
 
-- 无 DB 权限时退化为“接口造数 + 接口断言”。
-- 无 Redis 权限时跳过缓存断言，并在报告中标注“未验证”。
-- 无鉴权信息时不得伪造登录流程；相关接口标记为待确认。
-- 无接口文档时以代码扫描结果生成初版，并降低信息完整度评级。
+- `key`：可信宿主构造 RuntimeContext 时使用的唯一键；
+- `required`：当前资源是否必须提供；
+- `secret`：是否属于敏感值；
+- `format`：`string|url|origin_list|operation_list`。
 
-## 8. 待确认项
+配置文件只保存 binding 元数据。真实 URL、Token、Cookie、账号、密码、连接串及资源 profile 不得写入配置、TestPackage、argv、stdin、临时文件、结果或报告。旧 `_env` 字段不属于 Schema 2.1。
 
-> 禁止输出平铺清单。每项必须带阻塞阶段和决策人，并按三段分层输出。字段含义见 SKILL.md「4. 输出汇总」。
+## 3. 字段证据要求
 
-### 8.1 阻塞当前阶段（用户现在必须处理）
+关键字段应在相邻说明表中记录：字段路径、来源、证据等级、Owner、更新时间和证据引用。来源取 `code`、`deployment_config`、`user`、`probe`、`inferred`；证据等级取 `high`、`medium`、`low`。
 
-| ID | 待确认内容 | 阻塞阶段 | 级别 | 不解决的后果 | 决定人 | 解决后解锁 |
-|---|---|---|---|---|---|---|
-| `GAP-ENV-01` | `base_url` 与环境用途 | `probe` | hard | 请求发不出去，环境门禁直接失败 | 环境负责人 | 可执行环境可达性探测 |
-| `GAP-AUTH-01` | 鉴权类型、登录入口、token 字段和注入位置 | `probe` | hard | 无法通过鉴权门禁，业务用例全部未执行 | 环境负责人 | 可执行认证与契约探测 |
+## 4. 待确认项格式
 
-### 8.2 阻塞后续阶段（不挡当前推进）
+```yaml
+- id: GAP-UAT-AUTH-01
+  block_stage: probe
+  severity: hard
+  impact: 无法验证 UAT 登录上下文，业务请求不能发送
+  decider: 环境负责人
+  unlocks: 可执行 UAT 鉴权探测
+  evidence: deployment/config
+```
 
-| ID | 待确认内容 | 阻塞阶段 | 级别 | 不解决的后果 | 决定人 | 解决后解锁 |
-|---|---|---|---|---|---|---|
-| `GAP-DATA-01` | teardown、TTL、幂等和数据隔离策略 | `execute` | hard | 写用例无法执行，只能跑只读范围 | 用户本人 | 可执行写场景 |
-| `GAP-LINK-01` | 多接口链路和变量传递 | `execute` | soft | 链路用例降级为单接口验证 | 研发 | 可执行端到端链路 |
-| `GAP-ASSERT-01` | 成功码、错误码和异步一致性规则 | `execute` | soft | 断言只能停留在 HTTP 层，无法判定业务结果 | 研发 | 可断言业务结果与最终一致性 |
-| `GAP-DB-01` | DB/Redis 均为测试连接，且权限与库名 | `execute` | soft | 落库断言缺失，覆盖降级为接口层 | 环境负责人 | 可执行落库/缓存断言 |
-| `GAP-SIGN-01` | 签名算法和 `${SIGN_SECRET}` 使用方式 | `execute` | soft | 需签名的接口无法调用 | 研发 | 可调用签名接口 |
+## 5. 生命周期
 
-### 8.3 仅备查
+- `config_status`：`discovered|drafted|confirmed|verified|active|degraded|drifted|reconfirm_required|retired`
+- `runtime_status`：`unknown|unverified|verified|reachable|authentication_failed|connection_failed|permission_denied|unavailable`
 
-| ID | 待确认内容 | 阻塞阶段 | 级别 | 说明 |
-|---|---|---|---|---|
-| `GAP-NOTE-01` | 超时和代理策略 | `none` | soft | 先用默认值，出现超时再调整 |
+运行探测不得直接修改本文件；由 L1 适配器依据运行证据和责任人确认执行增量更新。
 
-分层判断标准只有一条：该项不解决，当前阶段的调度能不能启动。能启动就不进 8.1。
+## 6. 旧格式
 
-## 9. 变更记录
+缺少唯一 `yaml test-config` 块、`metadata.schema_version != "2.1"`、包含旧 `_env` 字段或包含需求级标题/结构时，返回：
 
-| 日期 | 变更内容 | 来源 | 操作人 |
-|---|---|---|---|
-| `YYYY-MM-DD` | 初版生成 | 代码/文档/推断 | `待填写` |
+```text
+TEST_CONFIG_SCHEMA_UNSUPPORTED
+检测到旧版 test-config.md。当前仅支持项目级多环境 Schema 2.1；请依据可验证证据重建项目配置。
+```
 
-> 本文件是 L1 配置初版，不代表测试已执行或配置已验证。后续变更应追加记录，不应删除原始待确认项而不说明原因。
+不兼容、不迁移、不猜测。
+
+## 7. 最近变更摘要
+
+只记录最近一次有效变更。完整历史由 Git 管理。初版只能标记为 `drafted`，不能标记为已验证或业务通过。

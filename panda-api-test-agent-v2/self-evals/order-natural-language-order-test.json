@@ -1,0 +1,140 @@
+{
+  "schema_version": "1.0",
+  "evaluation_id": "SELF-EVAL-NL-ORDER-001",
+  "title": "自然语言“帮我测试订单”正向订单创建整合流程",
+  "skill": "panda-api-test-agent-v2",
+  "purpose": "验证主 Agent 能否把简短自然语言请求编排为受控的测试环境订单创建流程，并正确处理真实业务写入、证据闭环、凭证保护和未清理残留。",
+  "network_policy": "stub_only",
+  "external_side_effects_allowed": false,
+  "source_scenario": {
+    "user_input": "帮我测试订单",
+    "resolved_intent": "测试环境订单创建接口的正向 EXECUTE 场景",
+    "environment_id": "test-omsgateway-eu-fr",
+    "business_action": "创建一笔新的测试订单",
+    "endpoint_role": "order_create",
+    "method": "POST",
+    "path": "/oms-api/api/extend/order/create"
+  },
+  "synthetic_runtime": {
+    "base_url": "http://stub.invalid/prod-api",
+    "allowed_origins": ["http://stub.invalid"],
+    "credentials": {
+      "source": "runtime_context",
+      "persist": false,
+      "literal": "REDACTED"
+    },
+    "response": {
+      "http_status": 200,
+      "body": {
+        "code": 200,
+        "msg": "操作成功",
+        "data": {
+          "cOrderNo": "STUB-ORDER-001",
+          "waybillNo": "STUB-WAYBILL-001"
+        }
+      }
+    }
+  },
+  "expected_orchestration": {
+    "mode": "EXECUTE",
+    "plan_stages": [
+      "compile_requirement",
+      "preflight_or_probe",
+      "business_order_create",
+      "read_only_verification",
+      "reduce_result"
+    ],
+    "required_ac": [
+      {
+        "ac_id": "AC-NL-ORDER-CREATE",
+        "text": "订单创建接口返回成功，并生成订单号和运单号"
+      }
+    ],
+    "business_task": {
+      "task_id": "TC-NL-ORDER-CREATE",
+      "type": "business",
+      "method": "POST",
+      "side_effect": "write",
+      "object_ref": {
+        "type": "order",
+        "reference_no": "SELF-EVAL-ORDER-001",
+        "environment_id": "test-omsgateway-eu-fr"
+      },
+      "cleanup_required": true,
+      "cleanup_disposition": "manual_confirmation_required"
+    },
+    "assertions": [
+      {
+        "id": "ASSERT-HTTP-200",
+        "source": "http_status",
+        "operator": "equals",
+        "expected": 200
+      },
+      {
+        "id": "ASSERT-CODE-200",
+        "source": "response_json",
+        "path": "$.code",
+        "operator": "equals",
+        "expected": 200
+      },
+      {
+        "id": "ASSERT-ORDER-NO",
+        "source": "response_json",
+        "path": "$.data.cOrderNo",
+        "operator": "exists",
+        "expected": true
+      },
+      {
+        "id": "ASSERT-WAYBILL-NO",
+        "source": "response_json",
+        "path": "$.data.waybillNo",
+        "operator": "exists",
+        "expected": true
+      }
+    ]
+  },
+  "expected_contract": {
+    "request_sent": true,
+    "business_execution": "passed",
+    "evidence": {
+      "business_execution": true,
+      "immutable": true,
+      "response_body_redacted": true
+    },
+    "security": {
+      "credentials_persisted": false,
+      "credentials_in_package": false,
+      "credentials_in_events": false,
+      "credentials_in_report": false,
+      "inline_sensitive_headers_rejected": true
+    },
+    "cleanup": {
+      "auto_cleanup": false,
+      "pending_object_must_be_recorded": true,
+      "residual_risk_must_be_visible": true
+    },
+    "final_verdict": "inconclusive",
+    "final_verdict_reason": "业务创建成功，但没有可验证的自动清理接口；不得因为业务任务通过而把统一 Run 或需求验收错误标记为 passed。"
+  },
+  "regression_targets": [
+    "自然语言请求必须映射到明确的业务 AC 和 business task",
+    "EXECUTE 写入任务必须携带 object_ref、side_effect 和清理处置",
+    "普通非生产写入可以执行，但残留风险必须进入结果归约",
+    "Result Reducer 必须继承 pending cleanup、residual risk、slice inconclusive 或 run blocked",
+    "仅技能执行成功不能冒充完整业务验收通过",
+    "运行时凭证只允许存在于内存 RuntimeContext，不得进入任何持久化产物"
+  ],
+  "forbidden": [
+    "不得访问真实订单接口",
+    "不得使用真实账号、密码、Basic Token、Cookie 或 Authorization 值",
+    "不得使用真实客户姓名、电话、地址、邮箱或已创建订单号",
+    "不得猜测或调用取消、删除、回滚接口",
+    "不得把 stub response 或业务执行成功直接归约为无条件 PASS"
+  ],
+  "known_issue_from_real_run": {
+    "id": "DEF-REDUCER-CLEANUP-SYNC",
+    "severity": "high",
+    "status": "open",
+    "description": "真实整合运行曾出现 Slice Executor 已识别清理残留，但 Result Reducer 重新归约为 passed 的不一致；该自评测用例用于防止回归。"
+  }
+}

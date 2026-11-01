@@ -7,6 +7,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR))
+from plan_fingerprint import calculate_plan_fingerprint  # noqa: E402
+
 
 CASE_STATUSES = {"passed", "failed", "error", "skipped", "not_run"}
 GATE_STATUSES = {"passed", "failed", "error"}
@@ -243,23 +247,52 @@ def validate_execution_trace(data, gate_results, case_results, cleanup):
 
 def validate_result(data, result_dir=None):
     errors = []
-    required = ["schema_version", "run_id", "mode", "project", "contract", "environment", "gate_results", "case_results", "requirement_trace", "execution_trace", "cleanup", "verdict"]
+    required = ["schema_version", "run_id", "mode", "project", "contract", "test_config", "environment", "gate_results", "case_results", "requirement_trace", "execution_trace", "cleanup", "verdict"]
     for field in required:
         if field not in data:
             errors.append(f"missing required field: {field}")
 
     if data.get("schema_version") != "1.1":
         errors.append("schema_version must be 1.1")
-    if data.get("mode") not in {"PROBE", "EXECUTE", "PROMOTE"}:
-        errors.append("mode must be PROBE, EXECUTE or PROMOTE")
+    if data.get("mode") not in {"PROBE", "EXECUTE"}:
+        errors.append("mode must be PROBE or EXECUTE")
+    plan = data.get("plan") or {}
+    if data.get("mode") == "EXECUTE":
+        if not plan.get("plan_fingerprint"):
+            errors.append("EXECUTE result requires plan.plan_fingerprint")
+        review = data.get("review") or {}
+        if review.get("status") not in {"approved", "approved_with_gaps"}:
+            errors.append("EXECUTE result requires an approved design review")
+        elif review.get("plan_fingerprint") != plan.get("plan_fingerprint"):
+            errors.append("review.plan_fingerprint must match plan.plan_fingerprint")
+    test_config = data.get("test_config") or {}
+    if test_config.get("schema_version") != "2.1" or not isinstance(test_config.get("config_revision"), int) or test_config.get("config_revision", 0) < 1:
+        errors.append("test_config requires schema_version=2.1 and positive config_revision")
+    if test_config.get("environment_id") != (data.get("environment") or {}).get("environment_id"):
+        errors.append("test_config.environment_id must match environment.environment_id")
+    if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", str(test_config.get("fingerprint", ""))):
+        errors.append("test_config.fingerprint must be sha256:<64 hex>")
 
     verdict = data.get("verdict")
     if verdict not in VERDICTS:
         errors.append(f"invalid verdict: {verdict}")
     contract = data.get("contract") or {}
-    fingerprint = contract.get("fingerprint", "")
-    if contract.get("lifecycle") != "executable" or not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", fingerprint):
-        errors.append("contract requires lifecycle=executable and fingerprint sha256:<64 hex>")
+    required_contract = (
+        "profile_path", "governance_schema_version", "profile_id", "profile_revision",
+        "code_baseline", "lifecycle", "document_fingerprint", "contract_fingerprint",
+    )
+    missing_contract = [field for field in required_contract if contract.get(field) in (None, "")]
+    if missing_contract:
+        errors.append("contract missing required interface profile identity fields: " + ", ".join(missing_contract))
+    if contract.get("governance_schema_version") != "1.0":
+        errors.append("contract governance_schema_version must be 1.0")
+    if not isinstance(contract.get("profile_revision"), int) or contract.get("profile_revision", 0) < 1:
+        errors.append("contract profile_revision must be a positive integer")
+    if contract.get("lifecycle") not in {"minimally_usable", "confirmed", "executable"}:
+        errors.append("contract lifecycle must be minimally_usable, confirmed, or executable")
+    for field in ("document_fingerprint", "contract_fingerprint"):
+        if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", str(contract.get(field, ""))):
+            errors.append(f"contract {field} must be sha256:<64 hex>")
 
     gate_results = data.get("gate_results", [])
     if not isinstance(gate_results, list):
@@ -504,6 +537,16 @@ def validate_result(data, result_dir=None):
     errors.extend(validate_execution_trace(data, gate_results, case_results, cleanup if isinstance(cleanup, dict) else {}))
 
     calculated = calculate_summary(case_results)
+    coverage = data.get("coverage")
+    if not isinstance(coverage, dict):
+        errors.append("coverage must be an object")
+    else:
+        for key in ("design", "execution_touch", "complete_scenario", "acceptance_pass", "case_execution"):
+            item = coverage.get(key)
+            if not isinstance(item, dict) or not isinstance(item.get("numerator"), int) or not isinstance(item.get("denominator"), int):
+                errors.append(f"coverage.{key} requires integer numerator and denominator")
+            elif item["numerator"] < 0 or item["denominator"] < item["numerator"]:
+                errors.append(f"coverage.{key} has invalid numerator/denominator")
     declared = data.get("summary")
     if declared is not None and declared != calculated:
         errors.append(f"summary mismatch: declared={declared}, calculated={calculated}")
@@ -536,12 +579,17 @@ def validate_result(data, result_dir=None):
             errors.append("passed verdict cannot contain cleanup.waived_cases")
         if failed_gates:
             errors.append("passed verdict cannot contain failed or error gates")
+        runtime_status = (data.get("environment") or {}).get("runtime_status") or {}
+        if runtime_status.get("auth") != "verified":
+            errors.append(
+                "passed verdict requires a passed auth_probe gate: environment.runtime_status.auth must be verified"
+            )
         if calculated["failed"] or calculated["errors"] or calculated["skipped"] or calculated["not_run"]:
             errors.append("passed verdict requires every case to be executed and passed")
         if calculated["total"] == 0:
             errors.append("passed verdict requires at least one business case")
-        if cleanup_status in {"failed", "not_run", "waived"} or waived_cases:
-            errors.append("passed verdict cannot contain incomplete or waived cleanup")
+        if cleanup_status in {"failed", "not_run", "waived"} or waived_cases or pending_objects:
+            errors.append("passed verdict cannot contain incomplete, waived, or pending cleanup")
         if ((data.get("requirement_trace") or {}).get("summary") or {}).get("required_complete") is not True:
             errors.append("passed verdict requires complete required requirement coverage")
 

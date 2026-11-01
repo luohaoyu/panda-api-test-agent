@@ -1,131 +1,127 @@
 ---
 name: panda-l1-adapter-generator
-description: 扫描代码工程，自动生成 L1 适配层（test-config + interface-profile）初版。当用户要求接入新工程、生成测试配置、扫描接口时使用。
+description: 扫描代码、部署与配置资产，创建或增量维护项目级多环境 test-config Schema 2.1 和接口画像。当用户要求接入新工程、重建项目测试配置、增加环境或复核配置漂移时使用。
 agent_created: true
 ---
 
 # L1 适配层生成器
 
-## 概述
+## 定位
 
-本 skill 用于扫描 Java、Node.js 或 Python 代码工程，依据可追溯的代码、配置和文档证据，生成 L1 适配层初版。产出包括 `docs/test-config.md` 与 `docs/interface-profile/` 下的接口画像文件，供后续用例生成 skill 消费。
+建立并维护项目级 L1 适配层：
 
-本 skill 是 L3 元技能“造配置的机器”的雏形：只建立测试适配配置和接口结构，不把初版结果冒充为已验证的业务知识。
+- `docs/test-config.md`：项目级、多环境、长期复用的测试基础设施配置。
+- `docs/interface-profile/*.md`：接口级契约、副作用和前置数据画像。
 
-跨项目原则：将通用扫描、证据归一、画像生命周期和授权摘要与项目适配内容分离。扫描结果必须绑定当前项目标识和工作区；不得复用其他工程的接口、环境、账号、数据集或授权指纹。
+`test-config.md` 只描述项目如何连接和安全使用各测试环境，不承载 PRD、目标分支、固定 Commit、验收项、专项样本、需求风险、单次 Gate 或测试结果。
+
+## 责任模型
+
+- 项目测试负责人是 `test-config.md` 的 Owner，批准配置进入 `active`。
+- 本 skill 是 `docs/test-config.md` 和 `docs/interface-profile/*.md` 的唯一技术写入者：负责创建草稿、增量更新、证据标注、revision/指纹维护和局部漂移标记，不替代责任人裁决。
+- 接口研发负责人确认路由、参数、响应、错误码、鉴权和代码副作用；产品/业务负责人确认无法由代码唯一证明的业务语义；测试负责人确认画像是否足以支持测试设计、Oracle 和安全执行。
+- 责任人提供确认结论，由本 skill 统一写入画像的确认记录；不得绕过本 skill 直接形成另一份可信画像。
+- 找不到 Owner、关键契约事实仍为推断或目标环境安全性无法确认时，完整画像不得进入 `executable`；但可以生成 `discovered`/`drafted`/`minimally_usable` 的局部画像，支持当前目标所需的 PROBE 或受控 EXECUTE。普通非生产写操作的存在不再单独阻断画像执行；其对象、范围、数据标签、清理/残留处置必须进入当前运行包。
+- `panda-api-test-agent` 只消费和调度；`panda-ai-api-tester` 与 Runner 只读画像、报告差异和验证运行状态；三者不得创建、修正或覆盖项目配置及接口画像。
 
 ## 何时使用
 
-适用于以下场景：
+- 首次接入项目，创建 Schema 2.1 项目配置。
+- 新增、修改或退役环境。
+- HTTP、认证、DB、Redis、MQ、配置中心或可观测性发生变化。
+- 主 Agent 检测到配置缺失、资源漂移或旧格式。
+- 扫描或更新接口画像。
 
-- 用户要求“接入新工程测试”“生成测试配置”或“扫描接口”。
-- 导入新的 Java、Node.js、Python 代码工程，需要建立 L1 适配层。
-- 需要从 Controller、路由、DTO、配置文件和部署文件整理接口画像初版。
+不用于生成需求上下文、测试用例、运行包、测试结果或真实凭据。
 
-不适用于以下场景：
+## Schema 与旧格式
 
-- 已有 L1 配置，只想编写单个测试用例；应交由用例生成 skill 处理。
-- 需要执行测试、分析测试结果或验证线上/测试环境可用性。
-- 需要补全业务语义、推测账号用途或写入真实凭据。
+唯一支持 `metadata.schema_version: "2.1"`；运行值仅通过 `runtime_bindings` 声明，旧 `_env` 字段不兼容。
 
-## 职责边界
+发现旧版需求级 `test-config.md` 时：
 
-✅ 做：扫描工程 → 生成 L1 两份文件初版 → 标注待确认项。
+1. 标记长期项目配置不可直接消费，不把旧格式当作 Schema 2.1。
+2. 不兼容、不迁移、不猜测旧字段；先根据当前测试目标和可验证证据生成独立的临时 Schema 2.1 运行配置。
+3. 未经明确授权不覆盖或删除旧文件；临时配置不得替代长期项目资产。
+4. 临时配置满足最小运行门禁后，可以继续当前 PROBE/局部 EXECUTE；正式项目配置仍保持 `drafted` 或 `reconfirm_required`。
 
-❌ 不做：生成用例、执行测试、判断业务语义、补全凭据。
+## 生命周期
 
-## 产出约定
+配置级状态：`discovered`、`drafted`、`confirmed`、`verified`、`active`、`degraded`、`drifted`、`reconfirm_required`、`retired`。
 
-- 生成 `docs/test-config.md`：描述被测环境、鉴权、数据源、链路、数据、断言、降级和待确认项。
-- 生成 `docs/interface-profile/`：按模块生成接口画像，至少包含路径、方法、鉴权、必填参数、成功码、错误码和前置数据七字段。
-- 每个字段记录来源：`代码`、`文档`、`运行探测` 或 `推断`；无法确认时写“待确认”，不得留空后伪装完整。
-- 每个接口记录生命周期：`discovered`、`drafted`、`human_confirmed`、`executable`、`drifted`、`reconfirm_required`。
-- 每个字段记录证据等级：`high`、`medium`、`low`，并区分事实、推断和待确认。
-- 生成项目级授权摘要/指纹时，只记录项目标识、接口契约摘要、风险范围、数据集和清理能力，不记录凭据值。
-- 输出扫描汇总报告，列出技术栈、扫描范围、命中/未命中项、信息完整度和**已分层的**待确认项（字段与分层规则见「4. 输出汇总」）。
+画像生命周期：`discovered`、`drafted`、`minimally_usable`、`confirmed`、`executable`、`drifted`、`reconfirm_required`、`retired`。`minimally_usable` 表示已具备当前目标所需的路由、方法、参数、鉴权和基本响应事实，可支持受控 PROBE/EXECUTE，但不代表完整契约已确认；只有关键契约事实、Owner 和目标执行所需边界已确认的画像才能进入 `executable`。普通非生产写副作用不单独阻断 `minimally_usable`，必须在运行包记录对象、范围、数据标签和清理/残留处置。
+
+运行级状态：`unknown`、`unverified`、`verified`、`reachable`、`authentication_failed`、`connection_failed`、`permission_denied`、`unavailable`。
+
+必须分离配置状态、画像生命周期与运行状态。运行失败不能自动改写前两者；Token 失效只影响对应环境的认证运行状态。运行发现契约差异时保留证据并请求复核，不得直接改画像。
 
 ## 核心流程
 
-1. 识别当前项目标识、工作区根目录、语言/框架/构建工具和模块边界。
-2. 读取当前项目已有 L1、授权摘要和上次扫描指纹；优先做增量扫描，不重复覆盖已确认内容。
-3. 按映射表逐项扫描，记录命中/未命中、来源、证据等级和契约差异。
-4. 生成或增量更新 `docs/test-config.md`。
-5. 生成或增量更新 `docs/interface-profile/`。
-6. 对未变化接口保留 `human_confirmed/executable` 状态；对变化接口标记 `drifted/reconfirm_required`，只列变化项。
-7. 输出项目范围内的授权摘要、指纹和汇总报告（不含凭据）。
+1. 识别项目 ID、工作区、模块、语言、框架和构建边界。
+2. 检查 `docs/test-config.md`：缺失、旧格式或字段不完整时，先按当前测试目标创建最小草稿或形成不落盘的临时运行输入；不得覆盖既有文件。Schema 2.1 配置则增量扫描。
+3. 按需扫描项目通用约定、环境清单、HTTP、认证和当前目标所需的 Oracle；DB、Redis、MQ、配置中心、日志、轨迹和可观测性仅在当前 AC 或运行包需要时获取。
+4. 按 `references/scan-mapping.md` 记录来源、证据等级、Owner、状态和变化范围。
+5. 使用 `references/config-template.md` 创建或局部更新配置；未变化且已确认的节点保持原状态。
+6. 只将受影响节点标为 `drifted` 或 `reconfirm_required`，递增 `config_revision`。
+7. 按 `references/profile-template.md` 独立生成或增量更新 `docs/interface-profile/*.md`，维护治理块、Owner、确认记录、画像 revision、生命周期和双指纹；接口生命周期不得替代项目配置生命周期。
+8. 只有契约语义变化才递增 `profile_revision` 和 `contract_fingerprint`；任何画像文件内容变化都更新 `document_fingerprint`。纯排版或说明文字变化不得伪造契约漂移。
+9. 解析用户提供的分支、Tag、Commit 或版本号：先查本地/远程 ref、相近命名、提交对象和基线文件；优先使用隔离 worktree 或只读对象检查，不切换、重置或覆盖用户工作区；记录实际采用基线与证据。
+10. 输出阻塞当前阶段、阻塞后续阶段和仅备查三层缺口；每个缺口必须绑定具体配置项、画像字段、AC 或 case，不得把局部缺口扩大为全局阻断。
 
-扫描时遵循“先 Controller/路由，再追 Service/DAO，最后补配置”的优先级。字段级扫描规则详见 `references/scan-mapping.md`。
+## 配置边界
 
-## 执行规则
+`test-config.md` 可以保存：
 
-### 1. 识别范围
+- 项目 ID、模块、通用 API Prefix、响应包络和成功规则。
+- 多环境 HTTP、认证、DB、Redis、MQ、配置中心、日志和轨迹查询的 RuntimeContext binding 元数据。
+- 项目通用安全策略、Owner、证据和状态。
 
-识别项目语言、Web 框架、构建工具、模块边界和配置文件位置。仅报告实际扫描到的技术栈；无法识别时标记为“待确认”。
+禁止保存：
 
-### 2. 扫描与记录
+- PRD、需求 ID、需求标题、验收项。
+- 目标分支、固定 Commit、专项接口清单。
+- 运单、任务或单次运行样本。
+- 需求专项授权、风险、Gate、用例和结果。
+- Token、Cookie、密码、连接串或 Secret 的真实值。
 
-按 `references/scan-mapping.md` 执行两类扫描：一类生成测试配置，一类生成接口画像。对每个扫描项记录：扫描位置、命中内容、生成字段、证据来源和缺口。优先使用代码证据，其次使用项目文档，最后才允许形成明确标记的推断。
+需求信息应进入 `.workbuddy/panda-api-test-agent/requirements/<requirement-id>/context.json`；单次执行信息应进入运行级 `package.json`。
 
-### 3. 生成文件
+## 增量更新规则
 
-使用 `references/config-template.md` 生成 `docs/test-config.md`，使用 `references/profile-template.md` 生成 `docs/interface-profile/{模块}.md`。保持模板章节结构；没有证据的值统一使用“待确认”，环境变量使用 `${VAR}` 形式。
+项目配置触发更新：环境增删改、域名/Gateway/API Prefix、认证机制、DB/Redis/MQ 拓扑、变量名、Secret 引用、可观测性入口、响应包络或安全规则变化。
 
-### 4. 输出汇总
+接口画像触发复核：Controller/Router 路径或方法、DTO/字段/校验注解、响应结构、异常映射或业务错误码、鉴权注解或权限逻辑、Service 调用链、DB/Redis/MQ/外部调用副作用、清理入口、异步轮询和最终一致性条件发生变化。只更新受影响接口；未变化且已确认的事实保持原状态。
 
-汇总扫描技术栈、文件范围、命中/未命中项、生成文件、字段来源和待确认项。信息完整度按 `★☆☆☆☆` 至 `★★★★★` 评级，并给出评级理由。汇总不得把“文件已生成”表述为“测试已通过”。
+运行差异不直接触发画像改写：先记录期望、实际、证据、候选分类和确认人，回查代码基线与部署版本；只有确认画像事实变化后才由本 skill 增量更新。产品缺陷、环境版本不一致和证据不足不得伪装成画像更新。
 
-#### 待确认项必须结构化
+不触发更新：新 PRD、需求状态、测试分支、固定 Commit、样本变化、单条用例失败、Token 值轮换、单次请求数量或验收结论变化。
 
-不得输出平铺的待确认清单。每一项至少包含以下字段：
+## 待确认项
 
-| 字段 | 取值 | 必填 | 说明 |
-|---|---|---|---|
-| `id` | 字符串 | 是 | 稳定标识，如 `GAP-AUTH-01` |
-| `block_stage` | `probe` / `execute` / `promote` / `none` | 是 | 阻塞哪个阶段才能推进 |
-| `severity` | `hard` / `soft` | 是 | `hard` 为硬阻塞；`soft` 存在降级路径 |
-| `impact` | 一句话 | 是 | 不解决会导致什么后果，用业务语言而非技术术语 |
-| `decider` | 角色 | 是 | 产品 / 研发 / 环境负责人 / 用户本人 |
-| `unlocks` | 一句话 | 是 | 解决后可推进到哪一步 |
-| `evidence` | 文件或代码位置 | 否 | 该项缺口的证据来源 |
-
-#### 汇总必须分层呈现
-
-按 `block_stage` 输出三段，顺序固定：
-
-1. **阻塞当前阶段**：`block_stage` 等于当前阶段的项，按 `severity` 排序。这是用户唯一需要立刻处理的部分。
-2. **阻塞后续阶段**：`block_stage` 晚于当前阶段的项，一句话说明"不挡当前推进"。
-3. **仅备查**：`block_stage=none` 的项。
-
-判断当前阶段的方法：尚无 `docs/test-config.md` 或画像时为准备期（对应 `probe` 门槛）；配置已生成且需验证业务时为执行期（对应 `execute` 门槛）。
-
-汇总不得用"待确认项较多"替代分层，也不得把后续阶段的项堆进当前阶段以显得完整。
+每项必须包含：`id`、`block_stage`、`severity`、`impact`、`decider`、`unlocks`，可选 `evidence`。按「阻塞当前阶段 / 阻塞后续阶段 / 仅备查」分层。资源确认人必须匹配字段类型。
 
 ## 纪律
 
-- ❌ 禁止编造：扫不到的字段一律标“待确认”。
-- ❌ 禁止写凭据：password/secret/token/账号只写 `${VAR}`。
-- ❌ 禁止判断业务语义：链路含义、账号用途留给人工。
-- ✅ 每条画像字段标注来源（代码/文档/推断）。
-- ✅ 信息完整度必须评级（★☆☆☆☆ ~ ★★★★★）。
-- ✅ db 配置强制注明“只连测试库”。
-- ✅ 发现生产地址、生产库或真实凭据线索时，不复制敏感值；只保留变量名或脱敏说明。
-- ✅ 初版配置必须保留待确认项，不以默认值掩盖扫描缺口。
-
-## 参考资料
-
-- 扫描源与字段映射：详见 `references/scan-mapping.md`。
-- `test-config.md` 模板：详见 `references/config-template.md`。
-- `interface-profile` 模板：详见 `references/profile-template.md`。
+- 不编造扫描不到的信息；使用 `drafted`、`unverified` 或待确认。
+- 敏感值不得写入配置；只记录 RuntimeContext binding 的 `key/required/secret/format` 元数据。
+- DB 和 Redis 默认只读且只允许测试资源；只有当前 AC 明确需要时才获取连接或断言配置。
+- 不把源码存在当作环境已部署，不把文件生成当作配置已验证。
+- 不把局部漂移、缺失的无关资源或单个画像字段扩大为整个项目失效。
+- 普通非生产业务写入、日志、轨迹和异步消息默认可作为测试副作用；记录精确对象、数据标签、清理状态和残留风险。删除、破坏性、批量或疑似生产动作必须单独确认。
+- 不生成需求专项 `test-config.md`。
 
 ## 完成判定
 
-只有同时满足以下条件，才视为 L1 初版生成完成：
+- `docs/test-config.md` 符合 Schema 2.1 项目级多环境模板。
+- 至少生成一个接口画像，或明确记录未发现路由。
+- 配置包含 Owner、`config_revision`、资源级状态和安全规则。
+- 每个画像包含唯一治理块、Owner、`profile_revision`、代码基线、确认记录、生命周期、副作用/清理边界、`document_fingerprint` 和 `contract_fingerprint`。
+- 敏感字段全部为变量引用。
+- 缺口已结构化和分层。
+- 结果明确为草稿或增量维护结果，不宣称测试已通过。
 
-1. `docs/test-config.md` 已生成并保留九节模板结构。
-2. `docs/interface-profile/` 已生成至少一个模块画像，或明确记录“未发现可识别路由”。
-3. 所有敏感字段使用变量占位符，未写入明文凭据。
-4. 所有未命中项、待验证项、信息完整度和扫描汇总均已输出。
-5. 结果明确声明“初版、待人工确认”，不宣称已生成用例或已执行测试。
-6. 增量扫描明确区分“未变化可复用”“发生漂移需确认”“证据不足需补充”，不得把全量扫描结果视为全量人工确认。
-7. 为下游自动门禁提供项目标识、画像生命周期、证据等级、契约指纹和风险范围；门禁通过不等于业务测试通过。
-8. 所有待确认项均已带 `block_stage`、`severity`、`impact`、`decider`、`unlocks` 字段，并按「阻塞当前阶段 / 阻塞后续阶段 / 仅备查」完成分层。缺少任一字段或未分层，视为汇总未完成。
+## 参考资料
+
+- 项目配置模板：`references/config-template.md`
+- 扫描映射：`references/scan-mapping.md`
+- 接口画像模板：`references/profile-template.md`

@@ -16,7 +16,7 @@
 
 ## 清理
 
-- 每个产生写副作用的用例和 HTTP fixture 必须有 teardown；唯一例外是满足 TestPackage 规范的 case-level `cleanup_waiver` 写用例。Runner 在写请求获得响应后立即登记清理，无论后续断言通过、失败或异常，都执行清理；豁免用例不注册 teardown，必须登记风险接受的残留对象。
+- 每个产生写副作用的用例和 HTTP fixture 优先配置 teardown；普通非生产单次业务写入在无法提供 teardown 时可采用可审计的残留登记或满足 TestPackage 规范的 case-level `cleanup_waiver`。Runner 在写请求获得响应后立即登记清理或残留对象，无论后续断言通过、失败或异常，都执行对应处置；豁免用例不注册 teardown，必须登记风险接受的残留对象。
 - 写请求使用 `cleanup_extract` 提取精确主键或 key；普通 `extract` 只在断言通过后供业务 DAG 使用，二者不得混淆。
 - teardown 只删除本次运行通过精确对象引用登记的 `tag=TEST` 数据和 `test:` 前缀 key。
 - 清理失败不能静默；报告标记清理失败并保留待处理对象清单。

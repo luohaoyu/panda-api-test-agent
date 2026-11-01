@@ -1,55 +1,85 @@
-# 扫描源 → 字段映射表
+# Schema 2.1 扫描源与字段映射
 
-本文件规定 L1 适配层生成器的扫描范围、证据来源和字段落点。扫描结果应区分“命中”“未命中”和“待确认”，不得用默认值掩盖缺口。
+## 1. 项目级 `test-config.md`
 
-## 生成 `test-config.md` 的扫描映射
+| 扫描对象 | 建议来源 | 配置落点 | 默认确认人 |
+|---|---|---|---|
+| 项目标识与模块 | 构建文件、workspace、应用入口 | `metadata.project_id`、`project.modules` | 研发负责人 |
+| API Prefix/响应包络 | Web 配置、响应类 | `project.*` | 后端研发 |
+| 环境清单 | `application-*`、部署描述、CI/CD、环境文档 | `environments.<id>` | 环境负责人 |
+| HTTP/Gateway/Proxy/TLS | 部署配置、网关说明、变量示例 | `environments.<id>.http` | 环境负责人 |
+| 认证机制 | Security/Filter/Interceptor/登录入口 | `authentication` | 研发/安全负责人 |
+| HTTP/认证运行绑定 | Secret key、部署模板 | `environments.<id>.runtime_bindings` | 环境负责人 |
+| DB | datasource、部署变量 | `environments.<id>.db` | DBA |
+| Redis | redis 配置、部署变量 | `environments.<id>.redis` | 中间件负责人 |
+| MQ/配置中心 | 客户端与部署配置 | `mq`、`config_center` | 中间件负责人 |
+| 日志/轨迹入口 | 运维文档、配置 | `observability` | 可观测性负责人 |
+| 安全策略 | 项目规则、测试规范 | `safety` | 测试/安全负责人 |
 
-| 扫什么 | 在哪扫 | 得到字段 |
+只保存 RuntimeContext binding 元数据（`key/required/secret/format`），不复制值，不生成 `_env` 字段。无法证明环境为非生产时，保持 `drafted` 并形成 `probe/hard` 缺口。
+
+## 2. 禁止写入项目配置的扫描结果
+
+以下信息即使扫描到也不得进入 `test-config.md`：
+
+- PRD、需求 ID、需求标题和验收项。
+- 目标发布分支、固定 Commit。
+- 需求目标接口、专项调用链、专项错误码。
+- 运单、任务、用户或其他单次样本。
+- 需求专项授权、风险、SLA、Gate、用例和结果。
+
+这些内容分别进入需求 `context.json`、`interface-profile` 或运行 `package.json`。
+
+## 3. 接口画像
+
+| 扫描对象 | 来源 | 画像字段 |
 |---|---|---|
-| 应用配置 | `application*.yml/properties`、`.env.example` | `base_url`、`timeout`、`gateway` |
-| 数据源配置 | datasource 段 | `db.type`、`db.host`、`db.port`、`db.database` |
-| 缓存配置 | redis 段 | `redis.host`、`redis.port`、`redis.db` |
-| 鉴权实现 | `Filter`/`Interceptor`/`SecurityConfig`/`@PreAuthorize` | `auth.type` |
-| 登录接口 | `LoginController` 及入出参 | `login-flow`（token 取哪个字段） |
-| 签名实现 | 签名工具类 | `sign-config` 骨架（密钥写 `${SIGN_SECRET}`） |
-| 部署编排 | `docker-compose.yml`、CI 配置 | 环境拓扑、多环境差异 |
-| 路由依赖 | Controller 间服务调用 | 链路骨架 |
+| 路由 | Controller/Router | path、method |
+| 入参与校验 | DTO、Validator | request schema、required params |
+| 响应与业务码 | 包装类、枚举、异常 | response schema、success/error codes |
+| 接口鉴权 | 注解和安全规则 | auth requirement |
+| 前置数据与副作用 | Service/DAO/MQ/外部调用 | pre-data、side-effect |
+| Owner 与确认范围 | CODEOWNERS、模块责任说明、人工确认 | owners、confirmation |
+| 副作用与清理 | Service/DAO/MQ/外部调用、清理入口 | side-effect、cleanup、async consistency |
+| 文档指纹 | 完整画像 Markdown（fingerprint 值规范化后） | document_fingerprint |
+| 契约指纹 | 规范化契约事实 | contract_fingerprint |
 
-## 生成 `interface-profile` 的扫描映射
+接口画像生命周期独立于项目配置生命周期。L1 是画像唯一技术写入者；责任人确认事实，主 Agent、AI Tester 和 Runner 只读。
 
-| 扫什么 | 在哪扫 | 得到字段 |
-|---|---|---|
-| 路由定义 | `@RequestMapping`/`@GetMapping`/`@PostMapping` | `path`、`method` |
-| 入参结构 | DTO/`@RequestBody`/`@RequestParam` | `required-params`、request schema |
-| 参数校验 | `@NotNull`/`@Valid`/JSR303 | 参数约束（来源=代码） |
-| 出参结构 | 响应包装类（如 `Result<T>`） | response schema |
-| 业务码 | code 常量类/枚举/异常类 | `success-code`、`error-codes` |
-| 鉴权范围 | 接口上的鉴权注解 | `auth`（继承或覆盖） |
-| 前置数据 | 接口依赖的 Service/DAO 调用 | `pre-data` 草稿（待验证） |
+## 4. 增量与漂移
 
-## 扫描优先级
+1. 先读取 Schema 2.1 配置与画像治理块，比较字段级差异及代码基线；旧 `_env` 配置不得继续消费。
+2. 未变化且已确认的配置节点和画像事实保持原状态。
+3. 配置声明或拓扑变化时，只将对应配置节点标记 `drifted` 或 `reconfirm_required`，递增 `metadata.config_revision`。
+4. 路由、方法、DTO/校验、响应、错误码、鉴权、Service 调用链、副作用、清理或异步收敛变化时，只将受影响画像标记 `drifted` 或 `reconfirm_required`。
+5. 契约语义变化时递增 `profile_revision`，更新 `contract_fingerprint` 与 `document_fingerprint`；纯排版/说明变化只更新 `document_fingerprint`。
+6. Token 值过期、网络临时失败等仅属于 `runtime_status`，不构成配置或画像漂移。
+7. 单条运行结果与画像不一致时先形成差异观察，回查代码基线、部署版本和责任人结论；不得直接用实际响应覆盖画像。
+8. 新需求、分支、样本和运行参数不触发项目配置或画像更新。
 
-1. 先扫 Controller 层或路由入口，建立接口清单和模块边界。
-2. 再追 Service/DAO，补充链路依赖、前置数据和响应来源。
-3. 最后补应用配置、数据源、缓存、鉴权、部署和多环境差异。
+## 5. 证据规则
 
-## 证据与缺口记录规则
+- `high`：用户/责任人明确确认、源码、Git、部署配置或真实探测。
+- `medium`：多项静态证据一致但未探测。
+- `low`：推断或待确认。
 
-- **代码**：直接来自注解、类、方法、字段、常量、校验器或调用关系。
-- **文档**：来自项目内 API 文档、部署说明、配置说明或接口契约。
-- **推断**：由可见证据推导出的初步结构；必须同时保留推断依据，并标为“待确认”。
-- **未命中**：扫描范围内没有找到可支持该字段的证据；字段值写“待确认”，汇总报告记录扫描位置。
-- **敏感信息**：密码、密钥、token、账号和连接凭据不得复制；只保留变量名，例如 `${DB_PASSWORD}`、`${SIGN_SECRET}`。
-- **环境信息**：无法确认是否为测试环境时，写“环境用途待确认”；数据库章节始终注明“只连测试库”。
+始终区分：发现不等于确认，源码存在不等于环境部署，配置验证不等于业务测试通过，运行差异不等于画像已经错误。
 
-## 建议扫描文件模式
+## 6. 画像准入
 
-以下模式用于建立初始扫描范围，实际以项目语言和框架为准：
+- `discovered|drafted`：允许继续扫描、设计缺口和生成局部配置，不允许完整 EXECUTE/PROMOTE。
+- `minimally_usable`：当前目标所需的路由、方法、参数、鉴权和基本响应事实已具备；允许受控 PROBE 或局部 EXECUTE，不代表完整画像治理通过。
+- `confirmed`：已完成指定范围确认；仍需检查当前执行所需 Owner、边界和指纹后才能转为完整 `executable`。
+- `executable`：允许 AI Tester 生成绑定该 revision 与双指纹的完整 TestPackage。
+- `drifted|reconfirm_required|retired`：阻断新 EXECUTE/PROMOTE，并使旧包失效。
+- 写操作不存在可靠清理能力时不得因画像声明而放行；单次 cleanup waiver 只属于 TestPackage 风险例外。
 
-- 配置：`application*.yml`、`application*.yaml`、`application*.properties`、`.env.example`、`config/*`。
-- Java：`*Controller.java`、`*Service.java`、`*Repository.java`、`*Dao.java`、`*Config.java`、`*Filter.java`、`*Interceptor.java`。
-- Node.js：`routes/**`、`controllers/**`、`services/**`、`middleware/**`、`config/**`、`app.*`、`server.*`。
-- Python：`routers/**`、`views/**`、`controllers/**`、`services/**`、`middleware/**`、`settings.*`、`main.*`。
-- 部署：`docker-compose*.yml`、`Dockerfile*`、`.github/workflows/**`、`.gitlab-ci.yml`、`Jenkinsfile`。
+## 7. 建议扫描入口
 
-模式只是检索入口，不代表文件一定存在。对不存在、不可读或未命中的模式必须形成缺口记录。
+
+- 配置：`application*.yml|yaml|properties`、`.env.example`、`config/**`。
+- Java：Controller、Service、Repository、Config、Filter、Interceptor。
+- Node/Python：routes、controllers、services、middleware、settings。
+- 部署：Docker、Compose、CI/CD、Helm/Kubernetes（若存在）。
+
+模式只是入口；未命中必须形成结构化缺口，不得用默认值补齐。

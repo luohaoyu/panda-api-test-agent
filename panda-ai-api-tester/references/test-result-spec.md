@@ -8,18 +8,47 @@
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "run_id": "run-001",
   "package_id": "PKG-001",
   "mode": "PROBE",
+  "plan": {
+    "plan_fingerprint": "sha256:<64 hex>",
+    "title": "验证目标接口核心链路"
+  },
+  "review": {
+    "status": "approved",
+    "review_id": "REVIEW-001",
+    "reviewer": "user",
+    "approved_at": "2026-10-30T23:30:00+08:00",
+    "plan_fingerprint": "sha256:<64 hex>"
+  },
   "project": {
     "system_id": "SYS-001",
     "requirement_refs": ["REQ-001"]
   },
+  "test_config": {
+    "path": "docs/test-config.md",
+    "schema_version": "2.1",
+    "config_revision": 3,
+    "environment_id": "local-test",
+    "fingerprint": "sha256:<64 hex>"
+  },
+  "contract": {
+    "profile_path": "docs/interface-profile/module.md",
+    "governance_schema_version": "1.0",
+    "profile_id": "project:module",
+    "profile_revision": 3,
+    "code_baseline": "<commit-or-release>",
+    "lifecycle": "executable",
+    "document_fingerprint": "sha256:<64 hex>",
+    "contract_fingerprint": "sha256:<64 hex>"
+  },
   "environment": {
     "environment_id": "local-test",
     "base_url": "http://127.0.0.1:8080",
-    "production": false
+    "production": false,
+    "runtime_status": {"http": "verified", "auth": "verified"}
   },
   "started_at": "2026-10-30T00:00:00+08:00",
   "finished_at": "2026-10-30T00:00:02+08:00",
@@ -42,10 +71,39 @@
     "waived_cases": []
   },
   "known_gaps": [],
+  "contract_observations": [],
+  "coverage": {
+    "design": {"numerator": 0, "denominator": 0, "percent": null},
+    "execution_touch": {"numerator": 0, "denominator": 0, "percent": null},
+    "complete_scenario": {"numerator": 0, "denominator": 0, "percent": null},
+    "acceptance_pass": {"numerator": 0, "denominator": 0, "percent": null},
+    "case_execution": {"numerator": 0, "denominator": 0, "percent": null}
+  },
   "summary": {},
   "verdict": "blocked"
 }
 ```
+
+`test_config` 与 `contract` 是运行事实的一部分，分别记录项目配置和接口画像在执行时的 revision、生命周期与指纹；历史结果不可因后续配置或画像更新而回写。`environment.runtime_status` 只陈述本次运行健康状态，不修改项目配置的 `config_status` 或画像 lifecycle。
+
+## 契约差异观察（contract_observations）
+
+实际响应与画像不一致时可记录：
+
+```json
+{
+  "observation_id": "CO-001",
+  "operation": "POST /orders",
+  "expected": {"business_code": "ORDER_NOT_FOUND"},
+  "actual": {"business_code": "INTERNAL_ERROR"},
+  "evidence_refs": ["evidence/case-001.json"],
+  "candidate_classification": "profile_drift|product_defect|environment_mismatch|inconclusive",
+  "decider": "interface_code_owner",
+  "next_action": "dispatch_l1_review"
+}
+```
+
+观察不等于画像已经错误。AI Tester 和 Runner 不得据此回写画像；主 Agent 必须结合代码基线、部署版本和责任人确认，调度 L1 复核。若证据已满足产品缺陷判定，可同时登记缺陷，但仍不得自动修改契约。
 
 ## 已知缺口（known_gaps）
 
@@ -75,7 +133,7 @@
 
 `render_report.py` 取 `description` 渲染；`promote.py` 用 `blocking` 判定是否允许晋级。因此 `blocking` 为 `true` 时不得进入 `PROMOTE`。
 
-允许保留字符串形式仅为兼容历史结果，但新生成的结果必须使用对象形式。
+只允许对象形式；不兼容字符串旧格式。
 
 ## 门禁结果
 
@@ -168,11 +226,12 @@ HTTP 步骤必须引用当前用例证据；断言步骤必须引用结果中的
 
 `executed = passed + failed + errors`。`skipped` 和 `not_run` 不计入实际执行。
 
-只有 `failed=0`、`errors=0`、`not_run=0`、清理不是 `failed/not_run/waived`，且所有必需覆盖均实际执行时，才允许 verdict 为 `passed`。只要 `waived_cases` 非空，verdict 必须为 `inconclusive`，除非存在更严重的 gates/case failed/error 状态。
+只有 `failed=0`、`errors=0`、`not_run=0`、清理不是 `failed/not_run/waived`、不存在 `pending_objects`，且所有必需覆盖均实际执行时，才允许 verdict 为 `passed`。只要 `waived_cases` 或未处置残留对象非空，verdict 必须为 `inconclusive`，除非存在更严重的 gates/case failed/error 状态。
 
 ## Verdict
 
-- `passed`：所有必需用例实际通过，清理成功或不需要。
+- `passed`：所有必需用例实际通过，清理成功或不需要，且不存在未处置的残留对象。
+- `partial`：当前用例已执行并得到事实结果，但画像治理、非当前 AC 的 Oracle 或其他非阻塞资产尚未完整确认；不得解释为需求级完整通过。
 - `failed`：存在经证据确认的业务失败或真实缺陷。
 - `error`：执行器或基础设施异常影响结论。
 - `blocked`：门禁、权限、环境或清理能力阻止业务执行。

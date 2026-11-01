@@ -19,7 +19,7 @@ STATUS_LABELS = {
     "none": "无副作用",
     "waived": "已风险豁免",
 }
-VALIDATOR_SHA256 = "ca0dc2894fa85f4753215e0028bda8484ed56b0f9762933ba33e876343e537c9"
+VALIDATOR_SHA256 = "f4311bae40c0eb3792e42433e9f5d3f07b7fd5fe0cdbb3f8cd6affbba66a1070"
 
 VERDICT_LABELS = {
     "passed": ("PASS", "全部必需验证已通过"),
@@ -386,7 +386,7 @@ def main():
         return 4
 
     checked = subprocess.run(
-        [sys.executable, str(validator), str(result_path), "--normalize"],
+        [sys.executable, str(validator), str(result_path)],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -396,7 +396,7 @@ def main():
         return checked.returncode
 
     data = json.loads(result_path.read_text(encoding="utf-8"))
-    summary = data["summary"]
+    summary = data.get("summary") or {"total": len(data.get("case_results") or []), "passed": 0, "failed": 0, "errors": 0, "skipped": 0, "not_run": 0, "executed": 0}
     project = data.get("project", {})
     environment = data.get("environment", {})
     cleanup = data.get("cleanup", {})
@@ -406,6 +406,15 @@ def main():
     contract = data.get("contract", {})
     requirement_trace = data.get("requirement_trace", {})
     execution_trace = data.get("execution_trace", {})
+    coverage = data.get("coverage", {})
+    plan = data.get("plan", {})
+    review = data.get("review", {})
+    runtime_status = environment.get("runtime_status") or {}
+    auth_status_text = {
+        "verified": "已验证（认证探测通过）",
+        "declared_only": "仅确认凭据存在，未验证有效期",
+        "authentication_failed": "认证失败",
+    }.get(runtime_status.get("auth"), "未知")
 
     if summary["executed"]:
         pass_percent = summary["passed"] / summary["executed"] * 100
@@ -425,7 +434,10 @@ def main():
     gap_items = render_gap_items(known_gaps)
     gate_passed = sum(1 for gate in gates if gate.get("status") == "passed")
     gate_problem = len(gates) - gate_passed
-    contract_fingerprint = contract.get("fingerprint") or "-"
+    contract_fingerprint = contract.get("contract_fingerprint") or "-"
+    plan_fingerprint = plan.get("plan_fingerprint") or "-"
+    if len(plan_fingerprint) > 30:
+        plan_fingerprint = plan_fingerprint[:22] + "…" + plan_fingerprint[-8:]
     if len(contract_fingerprint) > 30:
         contract_fingerprint = contract_fingerprint[:22] + "…" + contract_fingerprint[-8:]
 
@@ -465,6 +477,7 @@ def main():
     <span>运行 ID <code>{esc(data.get("run_id"))}</code></span>
     <span>模式 <code>{esc(data.get("mode"))}</code></span>
     <span>环境 <code>{esc(environment.get("environment_id") or "-")}</code></span>
+    <span>审核 <code>{esc(review.get("status") or "未审核")}</code></span>
     <span>生成于 {format_time(generated_at)}</span>
   </div>
 </header>
@@ -487,7 +500,11 @@ def main():
     <div class="info-item"><span>Package</span><code>{esc(data.get("package_id") or "-")}</code></div>
     <div class="info-item"><span>Base URL</span><code>{esc(environment.get("base_url") or "-")}</code></div>
     <div class="info-item"><span>环境安全性</span><strong>{"已确认非生产" if environment.get("production") is False else "未确认非生产"}</strong></div>
-    <div class="info-item"><span>契约指纹</span><code title="{esc(contract.get("fingerprint") or "-")}">{esc(contract_fingerprint)}</code></div>
+    <div class="info-item"><span>认证状态</span><strong>{esc(auth_status_text)}</strong></div>
+    <div class="info-item"><span>计划标题</span><strong>{esc(plan.get("title") or "-")}</strong></div>
+    <div class="info-item"><span>计划指纹</span><code title="{esc(plan.get("plan_fingerprint") or "-")}">{esc(plan_fingerprint)}</code></div>
+    <div class="info-item"><span>审核人 / 审核时间</span><strong>{esc(review.get("reviewer") or "-")} · {format_time(review.get("approved_at"))}</strong></div>
+    <div class="info-item"><span>契约指纹</span><code title="{esc(contract.get("contract_fingerprint") or "-")}">{esc(contract_fingerprint)}</code></div>
     <div class="info-item"><span>开始时间</span><strong>{format_time(data.get("started_at"))}</strong></div>
     <div class="info-item"><span>结束时间</span><strong>{format_time(data.get("finished_at"))}</strong></div>
     <div class="info-item"><span>报告生成</span><strong>{format_time(generated_at)}</strong></div>
@@ -495,6 +512,13 @@ def main():
 </section>
 <section class="panel" id="coverage">
   <div class="section-head"><div class="section-title"><span class="section-number">02</span><div><h2>需求与业务规则覆盖</h2><p>以需求点为起点，追踪到业务规则、测试场景、用例、关键断言和原始证据</p></div></div><span class="section-kpi">{(requirement_trace.get("summary") or {}).get("rules_passed", 0)}/{(requirement_trace.get("summary") or {}).get("rules_total", 0)} 规则通过</span></div>
+  <div class="coverage-cards">
+    <div class="coverage-card"><div><code>DESIGN</code><strong>设计覆盖</strong><p>有测试设计和 AC 映射</p></div><strong>{esc((coverage.get("design") or {}).get("numerator", 0))}/{esc((coverage.get("design") or {}).get("denominator", 0))}</strong></div>
+    <div class="coverage-card"><div><code>TOUCHED</code><strong>执行触达</strong><p>至少发送业务请求</p></div><strong>{esc((coverage.get("execution_touch") or {}).get("numerator", 0))}/{esc((coverage.get("execution_touch") or {}).get("denominator", 0))}</strong></div>
+    <div class="coverage-card"><div><code>COMPLETE</code><strong>完整场景覆盖</strong><p>关键 Oracle 均有证据</p></div><strong>{esc((coverage.get("complete_scenario") or {}).get("numerator", 0))}/{esc((coverage.get("complete_scenario") or {}).get("denominator", 0))}</strong></div>
+    <div class="coverage-card"><div><code>PASS</code><strong>验收通过</strong><p>需求级结论为 passed</p></div><strong>{esc((coverage.get("acceptance_pass") or {}).get("numerator", 0))}/{esc((coverage.get("acceptance_pass") or {}).get("denominator", 0))}</strong></div>
+  </div>
+  <p class="print-note">用例执行通过率不等于需求验收通过率；以上需求覆盖率统一以需求验收项为分母。</p>
   {render_requirement_matrix(requirement_trace)}
 </section>
 <section class="panel" id="execution">

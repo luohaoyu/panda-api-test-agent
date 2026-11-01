@@ -1,5 +1,7 @@
 # HTML 报告规范
 
+本文件约束**单次运行报告**（事实子页）。需求级结论见 `acceptance-report-spec.md`：运行报告提供事实，验收报告给出结论，两者不得互相替代。
+
 ## 生成原则
 
 正式报告必须由 `scripts/render_report.py` 从通过 `scripts/validate_result.py` 校验的 `result.json` 确定性生成。禁止由 Agent 根据对话或控制台输出自由组装正式 HTML。

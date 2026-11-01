@@ -1,6 +1,8 @@
 import copy
 import hashlib
 import json
+import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,17 +17,56 @@ SCRIPTS_DIR = SKILL_DIR / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import runner  # noqa: E402
+from runtime_context import RuntimeContext  # noqa: E402
 
 
 class CleanupWaiverTests(unittest.TestCase):
-    def _profile(self, temp_dir):
+    def _profile(self, temp_dir, lifecycle="executable", revision=1):
         profile = Path(temp_dir) / "interface-profile.md"
-        profile.write_text("# test profile\n", encoding="utf-8")
+        contract_fingerprint = "sha256:" + hashlib.sha256(b"test-contract-v1").hexdigest()
+        placeholder = "sha256:" + ("0" * 64)
+        raw = (
+            "# test profile\n\n```yaml interface-profile-governance\n"
+            "schema_version: \"1.0\"\n"
+            "profile_id: test-workspace:test-module\n"
+            f"profile_revision: {revision}\n"
+            "module_id: test-module\n"
+            "code_baseline: test-commit\n"
+            f"lifecycle: {lifecycle}\n"
+            "owners:\n"
+            "  code_owner: backend-owner\n"
+            "  business_owner: product-owner\n"
+            "  test_owner: qa-owner\n"
+            "confirmation:\n"
+            "  confirmed_by: backend-owner\n"
+            "  confirmed_at: 2026-10-30T20:00:00+08:00\n"
+            "  scope: [contract, side_effect, cleanup]\n"
+            "fingerprints:\n"
+            f"  document_fingerprint: {placeholder}\n"
+            f"  contract_fingerprint: {contract_fingerprint}\n"
+            "```\n\n## Contract\n\nPOST /items\n"
+        )
+        document_fingerprint = "sha256:" + hashlib.sha256(
+            runner._normalized_profile_document(raw).encode("utf-8")
+        ).hexdigest()
+        profile.write_text(raw.replace(placeholder, document_fingerprint, 1), encoding="utf-8")
         return profile
+
+    def _test_config(self, temp_dir):
+        config = Path(temp_dir) / "test-config.md"
+        config.write_text(
+            "# Project test config\n\n```yaml test-config\n"
+            "metadata:\n  schema_version: \"2.1\"\n  project_id: test-workspace\n  config_revision: 1\n"
+            "environments:\n  local-test:\n    production: false\n```\n",
+            encoding="utf-8",
+        )
+        return config
 
     def _package(self, temp_dir, **case_updates):
         profile = self._profile(temp_dir)
-        fingerprint = "sha256:" + hashlib.sha256(profile.read_bytes()).hexdigest()
+        config = self._test_config(temp_dir)
+        profile_identity = runner.load_interface_profile_identity(profile)
+        config_fingerprint = "sha256:" + hashlib.sha256(config.read_bytes()).hexdigest()
         approved_at = datetime.now(timezone.utc) - timedelta(minutes=1)
         expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
         case = {
@@ -83,24 +124,35 @@ class CleanupWaiverTests(unittest.TestCase):
             },
         }
         case.update(copy.deepcopy(case_updates))
-        return {
-            "schema_version": "1.0",
+        package = {
+            "schema_version": "2.1",
             "package_id": "PKG-CLEANUP-WAIVER-TEST",
             "project": {
                 "workspace_id": "test-workspace",
                 "system_id": "test-system",
                 "requirement_refs": ["REQ-CLEANUP"],
             },
-            "mode": "EXECUTE",
-            "contract": {
-                "profile_path": str(profile),
-                "fingerprint": fingerprint,
-                "lifecycle": "executable",
+            "test_config": {
+                "path": str(config),
+                "schema_version": "2.1",
+                "config_revision": 1,
+                "environment_id": "local-test",
+                "fingerprint": config_fingerprint,
             },
+            "mode": "EXECUTE",
+            "contract": profile_identity,
             "environment": {
                 "environment_id": "local-test",
-                "base_url": "http://127.0.0.1:9",
                 "production": False,
+                "runtime_bindings": {
+                    "base_url": {
+                        "key": "LOCAL_TEST_BASE_URL",
+                        "required": True,
+                        "secret": False,
+                        "format": "url",
+                    },
+                    "auth": {"type": "none"},
+                },
             },
             "risk": {
                 "side_effect_level": "write",
@@ -150,9 +202,27 @@ class CleanupWaiverTests(unittest.TestCase):
             "cases": [case],
             "known_gaps": [],
         }
+        package = {
+            **package,
+            "review": {
+                "status": "approved",
+                "review_id": "REVIEW-CLEANUP-001",
+                "reviewer": "test-reviewer",
+                "approved_at": approved_at.isoformat(),
+                "approved_scope": ["TC-WAIVED-POST"],
+                "accepted_gaps": [],
+            },
+        }
+        package["review"]["plan_fingerprint"] = runner.calculate_plan_fingerprint(package)
+        return package
 
     def _runner(self, package, run_dir):
-        test_runner = runner.ApiTestRunner(package, run_dir)
+        context = RuntimeContext.from_mapping(
+            "local-test",
+            {"LOCAL_TEST_BASE_URL": "http://127.0.0.1:9"},
+            context_id="ctx-cleanup-test",
+        )
+        test_runner = runner.ApiTestRunner(package, run_dir, runtime_context=context)
         calls = []
 
         def execute(request):
@@ -188,37 +258,96 @@ class CleanupWaiverTests(unittest.TestCase):
 
     def _assert_rejected(self, package, message):
         with tempfile.TemporaryDirectory() as temp_dir:
-            test_runner = runner.ApiTestRunner(package, Path(temp_dir) / "run")
+            context = RuntimeContext.from_mapping("local-test", {"LOCAL_TEST_BASE_URL": "http://127.0.0.1:9"})
+            test_runner = runner.ApiTestRunner(package, Path(temp_dir) / "run", runtime_context=context)
             with self.assertRaisesRegex(runner.RunnerError, message):
                 test_runner._validate_package()
 
-    def test_write_without_teardown_or_waiver_is_rejected(self):
+    def test_write_without_teardown_or_waiver_tracks_residual_object(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             package = self._package(temp_dir)
             package["cases"][0].pop("cleanup_waiver")
-            self._assert_rejected(package, "requires cleanup_extract")
+            package["review"]["plan_fingerprint"] = runner.calculate_plan_fingerprint(package)
+            context = RuntimeContext.from_mapping("local-test", {"LOCAL_TEST_BASE_URL": "http://127.0.0.1:9"})
+            test_runner = runner.ApiTestRunner(package, Path(temp_dir) / "run", runtime_context=context)
+            test_runner._validate_package()
 
     def test_valid_waiver_package_passes_validation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             package = self._package(temp_dir)
-            test_runner = runner.ApiTestRunner(package, Path(temp_dir) / "run")
+            context = RuntimeContext.from_mapping("local-test", {"LOCAL_TEST_BASE_URL": "http://127.0.0.1:9"})
+            test_runner = runner.ApiTestRunner(package, Path(temp_dir) / "run", runtime_context=context)
             test_runner._validate_package()
+
+    def test_package_cannot_self_declare_executable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package = self._package(temp_dir)
+            profile = Path(package["contract"]["profile_path"])
+            raw = profile.read_text(encoding="utf-8").replace("lifecycle: executable", "lifecycle: drafted")
+            placeholder = re.sub(
+                r"(?m)^(\s*document_fingerprint:\s*)sha256:[0-9a-fA-F]{64}$",
+                r"\g<1>sha256:" + ("0" * 64),
+                raw,
+            )
+            digest = "sha256:" + hashlib.sha256(
+                runner._normalized_profile_document(placeholder).encode("utf-8")
+            ).hexdigest()
+            raw = re.sub(
+                r"(?m)^(\s*document_fingerprint:\s*)sha256:[0-9a-fA-F]{64}$",
+                lambda match: match.group(1) + digest,
+                placeholder,
+            )
+            profile.write_text(raw, encoding="utf-8")
+            self._assert_rejected(package, "interface profile lifecycle mismatch")
+
+    def test_profile_revision_change_invalidates_old_package(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package = self._package(temp_dir)
+            profile = Path(package["contract"]["profile_path"])
+            raw = profile.read_text(encoding="utf-8").replace("profile_revision: 1", "profile_revision: 2")
+            placeholder = re.sub(
+                r"(?m)^(\s*document_fingerprint:\s*)sha256:[0-9a-fA-F]{64}$",
+                r"\g<1>sha256:" + ("0" * 64),
+                raw,
+            )
+            digest = "sha256:" + hashlib.sha256(
+                runner._normalized_profile_document(placeholder).encode("utf-8")
+            ).hexdigest()
+            profile.write_text(
+                re.sub(
+                    r"(?m)^(\s*document_fingerprint:\s*)sha256:[0-9a-fA-F]{64}$",
+                    lambda match: match.group(1) + digest,
+                    placeholder,
+                ),
+                encoding="utf-8",
+            )
+            self._assert_rejected(package, "interface profile profile_revision mismatch")
+
+    def test_profile_document_change_invalidates_old_package(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package = self._package(temp_dir)
+            profile = Path(package["contract"]["profile_path"])
+            profile.write_text(profile.read_text(encoding="utf-8") + "\nAdditional note.\n", encoding="utf-8")
+            self._assert_rejected(package, "document_fingerprint mismatch")
 
     def test_production_waiver_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             package = self._package(temp_dir)
             package["environment"]["production"] = True
+            package["review"]["plan_fingerprint"] = runner.calculate_plan_fingerprint(package)
             self._assert_rejected(package, "requires environment.production=false")
 
     def test_waiver_request_and_execution_limits_must_be_one(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             package = self._package(temp_dir)
             package["cases"][0]["cleanup_waiver"]["max_requests"] = 2
+            package["review"]["plan_fingerprint"] = runner.calculate_plan_fingerprint(package)
             self._assert_rejected(package, "invalid required fields")
 
         with tempfile.TemporaryDirectory() as temp_dir:
             package = self._package(temp_dir)
             package["cases"][0]["max_executions"] = 2
+            package["review"]["plan_fingerprint"] = runner.calculate_plan_fingerprint(package)
             self._assert_rejected(package, "requires max_executions=1")
 
     def test_destructive_waiver_is_rejected(self):
