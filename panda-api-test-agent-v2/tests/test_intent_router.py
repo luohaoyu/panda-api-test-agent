@@ -35,6 +35,21 @@ class IntentRouterTests(unittest.TestCase):
         self.assertFalse(result["supported"])
         self.assertEqual(result["confidence"], "low")
 
+    def test_unmatched_request_still_returns_structured_candidates(self):
+        result = route_intent("帮我测试订单")
+        self.assertIsNone(result["intent"])
+        self.assertTrue(result["requires_ai_clarification"])
+        self.assertEqual(len(result["candidates"]), 4)
+        self.assertEqual(result["candidate_source"], "unmatched_default_order")
+        self.assertTrue(all({"intent_type", "score"} <= set(item) for item in result["candidates"]))
+        self.assertFalse(result["execution_allowed"])
+
+    def test_keyword_match_exposes_ranked_candidates(self):
+        result = route_intent("检查这个接口质量")
+        self.assertEqual(result["candidate_source"], "keyword_match")
+        self.assertEqual(result["candidates"][0]["intent_type"], "single_api_quality")
+        self.assertGreater(result["candidates"][0]["score"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

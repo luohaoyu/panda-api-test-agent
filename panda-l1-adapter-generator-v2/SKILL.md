@@ -97,7 +97,7 @@ version: 2.0.1
 - 需求专项授权、风险、Gate、用例和结果。
 - Token、Cookie、密码、连接串或 Secret 的真实值。
 
-需求信息应进入 `.workbuddy/panda-api-test-agent/requirements/<requirement-id>/context.json`；单次执行信息应进入运行级 `package.json`。
+需求信息应进入 `.panda-api-test-agent/requirements/<requirement-id>/context.json`（与 `panda-api-test-agent-v2` 主 Agent 的编排职责保持同一契约路径）；单次执行信息应进入运行级 `package.json`。
 
 ## 增量更新规则
 

@@ -111,7 +111,19 @@
     "cleanup": {
       "auto_cleanup": false,
       "pending_object_must_be_recorded": true,
-      "residual_risk_must_be_visible": true
+      "residual_risk_must_be_visible": true,
+      "reducer_status_expected": "pending",
+      "reducer_tasks_complete_expected": false,
+      "unresolved_obligation_expected": ["TC-NL-ORDER-CREATE"]
+    },
+    "requirement_aggregation": {
+      "current_status_expected": "inconclusive",
+      "must_expose_cleanup_and_evidence_closure": true,
+      "residual_risks_must_list_unresolved_obligation": true
+    },
+    "review_gate": {
+      "missing_review_state_must_block": true,
+      "blocked_reason_event": "slice_blocked_unreviewed"
     },
     "final_verdict": "inconclusive",
     "final_verdict_reason": "业务创建成功，但没有可验证的自动清理接口；不得因为业务任务通过而把统一 Run 或需求验收错误标记为 passed。"
@@ -134,7 +146,13 @@
   "known_issue_from_real_run": {
     "id": "DEF-REDUCER-CLEANUP-SYNC",
     "severity": "high",
-    "status": "open",
+    "status": "fixed",
+    "fixed_in_version": "2.3.0",
+    "fix_summary": "Result Reducer 区分 cleanup 任务与写入残留义务，写入任务通过不再等于清理完成；Slice Executor 把 runner 声明的残留对象写入 resources.json；需求聚合层继承 cleanup 与 evidence_closure 并在残留未解除时降级。",
+    "regression_tests": [
+      "panda-ai-api-tester-v2/tests/test_p0_fail_closed.py::CleanupSemanticsTests",
+      "panda-api-test-agent-v2/tests/test_aggregation_integrity.py::ResidualAwareAggregationTests"
+    ],
     "description": "真实整合运行曾出现 Slice Executor 已识别清理残留，但 Result Reducer 重新归约为 passed 的不一致；该自评测用例用于防止回归。"
   }
 }

@@ -131,6 +131,68 @@ def _validate_envelope(payload, *, run_id, package, now):
     return dict(values)
 
 
+TEMP_ARTIFACT_PATTERN = re.compile(r"^\.[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.[0-9a-f]{32}\.(consuming|writing)\.json$")
+STALE_TEMP_SECONDS = 900
+EXPIRY_GRACE = timedelta(seconds=60)
+
+
+def purge_stale_envelopes(package_path, *, now=None, stale_after_seconds=STALE_TEMP_SECONDS, purge_expired=True):
+    """Remove leftovers that a crashed writer/consumer could have left behind.
+
+    A consumer claims the envelope with ``os.replace`` and deletes it in ``finally``.
+    If the process dies in between, plaintext secret material would otherwise stay
+    on disk forever. Only two things are removed: temporary claim/write artifacts
+    older than ``stale_after_seconds``, and envelopes whose declared ``expires_at``
+    has already passed. Live envelopes of other runs are never touched.
+
+    ``purge_expired=False`` is used while consuming: the requested run must reach
+    its own validation so the caller learns *why* it failed (expired, mismatched
+    fingerprint, ...) instead of "does not exist".
+    """
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    reference = reference.astimezone(timezone.utc)
+    removed = []
+    skipped = []
+    try:
+        project_root = project_root_for_package(package_path)
+    except LocalSecretBridgeError:
+        return {"removed": removed, "skipped": skipped}
+    secret_root = (project_root / ".panda-api-test-agent" / "local" / "runtime" / "secrets").resolve(strict=False)
+    if not secret_root.is_dir():
+        return {"removed": removed, "skipped": skipped}
+    for entry in sorted(secret_root.iterdir()):
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        try:
+            age = (reference - datetime.fromtimestamp(entry.stat().st_mtime, tz=timezone.utc)).total_seconds()
+        except OSError:
+            continue
+        if TEMP_ARTIFACT_PATTERN.fullmatch(entry.name):
+            if age < stale_after_seconds:
+                continue
+        elif entry.name.endswith(".secret.json"):
+            if not purge_expired:
+                continue
+            try:
+                payload = json.loads(entry.read_text(encoding="utf-8"))
+                expires_at = _parse_time(payload.get("expires_at"), "expires_at")
+            except (OSError, UnicodeError, json.JSONDecodeError, LocalSecretBridgeError):
+                skipped.append(str(entry))
+                continue
+            if reference < expires_at + EXPIRY_GRACE:
+                continue
+        else:
+            continue
+        try:
+            entry.unlink()
+            removed.append(str(entry))
+        except OSError:
+            skipped.append(str(entry))
+    return {"removed": removed, "skipped": skipped}
+
+
 def consume_local_runtime_envelope(package_path, package, run_id, *, now=None):
     """Consume, delete and validate one fixed-path local runtime envelope.
 
@@ -139,6 +201,11 @@ def consume_local_runtime_envelope(package_path, package, run_id, *, now=None):
     Values are returned only when validation and deletion both succeed.
     """
     safe_run_id = _validate_run_id(run_id)
+    try:
+        purge_stale_envelopes(package_path, now=now, purge_expired=False)
+    except Exception:
+        # Housekeeping must never turn into a reason to skip validation.
+        pass
     secret_path = secret_envelope_path(package_path, safe_run_id)
     if not secret_path.exists():
         raise LocalSecretBridgeError("local runtime envelope does not exist for the requested run")

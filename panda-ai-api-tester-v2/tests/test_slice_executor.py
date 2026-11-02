@@ -11,11 +11,19 @@ from slice_executor import SliceExecutionError, execute_slice, replay_volatile_s
 from result_reducer import load_events
 
 
+def _approved_metadata(plan):
+    case_ids = [item.get("case_id") for item in plan.get("tasks") or [] if isinstance(item, dict) and item.get("case_id")]
+    return {
+        "entry_type": "single_api_quality",
+        "review": {"status": "approved", "review_id": "REVIEW-TEST", "approved_case_ids": case_ids},
+    }
+
+
 class SliceExecutorTests(unittest.TestCase):
     def _run(self, intent):
         plan = compile_plan(intent)
         root = Path(tempfile.mkdtemp()) / "run"
-        create_run(root, run_id="RUN-1", plan_id=plan["plan_id"], plan_fingerprint=plan["plan_fingerprint"], environment_snapshot={"environment_id": "test"}, plan=plan)
+        create_run(root, run_id="RUN-1", plan_id=plan["plan_id"], plan_fingerprint=plan["plan_fingerprint"], environment_snapshot={"environment_id": "test"}, plan=plan, entry_metadata=_approved_metadata(plan))
         return root, plan
 
     def test_approval_digest_is_persisted_not_raw_token(self):
@@ -28,11 +36,14 @@ class SliceExecutorTests(unittest.TestCase):
         self.assertNotIn("approval-secret", text)
         self.assertIn("approval_digest", text)
 
-    def test_approval_slice_does_not_execute_task(self):
-        root, plan = self._run({
+    def test_pending_review_run_does_not_execute_task(self):
+        intent = {
             "requirement_id": "REQ-1", "acceptance_criteria": [{"ac_id": "AC-1"}],
             "tasks": [{"task_id": "DELETE", "type": "business", "method": "DELETE", "side_effect": "destructive", "object_ref": "order-1"}],
-        })
+        }
+        plan = compile_plan(intent)
+        root = Path(tempfile.mkdtemp()) / "run"
+        create_run(root, run_id="RUN-PENDING", plan_id=plan["plan_id"], plan_fingerprint=plan["plan_fingerprint"], environment_snapshot={"environment_id": "test"}, plan=plan, entry_metadata={"entry_type": "single_api_quality", "review": {"status": "pending_review", "approved_case_ids": []}})
         called = []
         result = execute_slice(root, "S1", task_executor=lambda task, **_: called.append(task["task_id"]) or {"status": "passed"})
         self.assertEqual(result["status"], "awaiting_approval")

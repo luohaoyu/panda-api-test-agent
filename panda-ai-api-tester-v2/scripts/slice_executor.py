@@ -21,6 +21,28 @@ class ApprovalRequired(SliceExecutionError):
     pass
 
 
+EXECUTABLE_REVIEW_STATUSES = {"approved", "partially_approved"}
+PENDING_REVIEW_STATUSES = {"pending_review"}
+KNOWN_NON_EXECUTABLE_REVIEW_STATUSES = {"rejected", "plan_only", "expired", "superseded"}
+
+
+def review_clearance(state: dict[str, Any]) -> tuple[str, str]:
+    """Decide whether a run may execute at all.
+
+    The decision is fail-closed: an absent, empty or unrecognised review state is
+    never treated as approval, so a truncated or legacy ``state.json`` cannot
+    unlock business execution.
+    """
+    status = state.get("review_status")
+    if status in EXECUTABLE_REVIEW_STATUSES:
+        return "executable", ""
+    if status in PENDING_REVIEW_STATUSES:
+        return "awaiting_approval", "run review is pending"
+    if status in KNOWN_NON_EXECUTABLE_REVIEW_STATUSES:
+        return "not_executable", f"run review status {status} is not executable"
+    return "unreviewed", "run review state is missing or unrecognised; execution refused (fail-closed)"
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -103,6 +125,42 @@ def _sub_package_for_slice(package: dict[str, Any], tasks: list[dict[str, Any]],
     return result
 
 
+def _record_runner_residuals(root: Path, slice_id: str, result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Turn runner-declared residual objects into durable resource facts.
+
+    Only identity and classification are kept; object values are never copied, so
+    no business payload or credential can leak into ``resources.json``.
+    """
+    cleanup = result.get("cleanup") if isinstance(result.get("cleanup"), dict) else {}
+    objects: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(cleanup.get("pending_objects") or []):
+        if not isinstance(item, dict):
+            continue
+        case_id = str(item.get("case_id") or "unknown")
+        object_ref = item.get("object_ref")
+        object_id = str(item.get("object_id") or "").strip()
+        if not object_id:
+            if isinstance(object_ref, str) and object_ref.strip():
+                object_id = object_ref.strip()
+            else:
+                object_id = f"{case_id}#{index + 1}"
+        if object_id in seen:
+            continue
+        seen.add(object_id)
+        objects.append({
+            "object_id": object_id,
+            "object_type": object_ref.get("type") if isinstance(object_ref, dict) else "object",
+            "case_id": case_id,
+            "cleanup_status": "pending",
+            "cleanup_source": "http_runner_residual",
+            "slice_id": slice_id,
+            "reason": str(item.get("reason") or "")[:200] or None,
+            "risk": item.get("risk"),
+        })
+    return objects
+
+
 def execute_package_slice(run_dir: str | Path, slice_id: str, package: dict[str, Any], *, runtime_context: Any, approval_token: str | None = None, task_executor=None) -> dict[str, Any]:
     """Run one compiled slice through the appropriate trusted executor.
 
@@ -120,7 +178,8 @@ def execute_package_slice(run_dir: str | Path, slice_id: str, package: dict[str,
     completed = set(state.get("completed_slices") or [])
     if slice_id in completed:
         raise SliceExecutionError(f"slice already completed: {slice_id}")
-    if (slice_spec.get("approval") or {}).get("required") and not approval_token and not (state.get("entry_type") and state.get("review_status") in {"approved", "partially_approved"}):
+    clearance, _ = review_clearance(state)
+    if clearance != "executable":
         return execute_slice(root, slice_id, runtime_context=runtime_context)
     task_by_id = _task_map(plan)
     task_ids = list(slice_spec.get("task_ids") or [])
@@ -152,9 +211,22 @@ def execute_package_slice(run_dir: str | Path, slice_id: str, package: dict[str,
             facts.append({"task_id": case.get("case_id"), "status": case.get("status"), "evidence_refs": refs})
         verdict = result.get("verdict")
         slice_status = "passed" if verdict == "passed" else "failed" if verdict == "failed" else "blocked" if verdict == "blocked" else "inconclusive"
+        residuals = _record_runner_residuals(root, slice_id, result)
+        if residuals:
+            # A runner-declared residual object is a durable cleanup obligation. It
+            # must survive into resources.json, otherwise the reducer re-derives a
+            # green verdict from the business facts alone.
+            update_resources(root, residuals)
+            merged_pending = sorted(
+                set(load_state(root).get("pending_cleanup") or []) | {item["object_id"] for item in residuals}
+            )
+            update_state(root, {"pending_cleanup": merged_pending})
+            append_event(root, {"type": "cleanup_obligation_registered", "slice_id": slice_id, "object_ids": sorted(item["object_id"] for item in residuals)})
+            if slice_status == "passed":
+                slice_status = "inconclusive"
         append_event(root, {"type": "slice_finished", "slice_id": slice_id, "status": slice_status, "result_ref": str(result_path)})
         update_state(root, {"completed_slices": sorted(completed | {slice_id}), "next_slice_id": None, "status": "ready" if slice_status == "passed" else "blocked"})
-        return {"status": slice_status, "slice_id": slice_id, "facts": facts, "result": str(result_path), "sensitive_variables_persisted": False}
+        return {"status": slice_status, "slice_id": slice_id, "facts": facts, "result": str(result_path), "residual_objects": residuals, "sensitive_variables_persisted": False}
     except Exception as exc:
         append_event(root, {"type": "slice_finished", "slice_id": slice_id, "status": "error", "reason": str(exc)})
         update_state(root, {"status": "interrupted", "next_slice_id": slice_id})
@@ -173,22 +245,23 @@ def execute_slice(run_dir: str | Path, slice_id: str, *, runtime_context: Any = 
     completed = set(state.get("completed_slices") or [])
     if slice_id in completed:
         raise SliceExecutionError(f"slice already completed: {slice_id}")
-    if state.get("entry_type") and state.get("review_status") not in {"approved", "partially_approved"}:
-        if state.get("review_status") == "pending_review":
-            append_event(root, {"type": "slice_waiting_review", "slice_id": slice_id, "task_ids": slice_spec.get("task_ids") or []})
-            update_state(root, {"status": "awaiting_approval", "phase": "pending_review", "next_action": "request_approval", "next_slice_id": slice_id})
-            return {"status": "awaiting_approval", "slice_id": slice_id, "task_ids": slice_spec.get("task_ids") or []}
-        raise SliceExecutionError(f"run review is not executable: {state.get('review_status')}")
+    clearance, clearance_reason = review_clearance(state)
+    if clearance == "awaiting_approval":
+        append_event(root, {"type": "slice_waiting_review", "slice_id": slice_id, "task_ids": slice_spec.get("task_ids") or []})
+        update_state(root, {"status": "awaiting_approval", "phase": "pending_review", "next_action": "request_approval", "next_slice_id": slice_id})
+        return {"status": "awaiting_approval", "slice_id": slice_id, "task_ids": slice_spec.get("task_ids") or []}
+    if clearance != "executable":
+        append_event(root, {"type": "slice_blocked_unreviewed", "slice_id": slice_id, "task_ids": slice_spec.get("task_ids") or [], "review_status": state.get("review_status"), "reason": clearance_reason})
+        update_state(root, {"status": "blocked", "next_action": "review_not_executable", "next_slice_id": slice_id, "failure_class": clearance})
+        raise ApprovalRequired(clearance_reason)
     if state.get("status") in {"blocked", "reduced", "reported"}:
         raise SliceExecutionError(f"run is not executable in status {state.get('status')}")
     pending_cleanup = state.get("pending_cleanup") or []
     if pending_cleanup and slice_spec.get("type") not in {"cleanup", "reduce"}:
         raise SliceExecutionError("pending cleanup obligations must be handled before continuing")
-    if (slice_spec.get("approval") or {}).get("required") and not approval_token and not (state.get("entry_type") and state.get("review_status") in {"approved", "partially_approved"}):
-        append_event(root, {"type": "slice_waiting_approval", "slice_id": slice_id, "task_ids": slice_spec.get("task_ids") or []})
-        update_state(root, {"status": "awaiting_approval", "next_slice_id": slice_id})
-        return {"status": "awaiting_approval", "slice_id": slice_id, "task_ids": slice_spec.get("task_ids") or []}
-    if (slice_spec.get("approval") or {}).get("required"):
+    if (slice_spec.get("approval") or {}).get("required") and approval_token:
+        # Run-level approval already authorised the design; a per-slice token is an
+        # optional second confirmation for high-risk slices, and only its digest is kept.
         approval_digest = hashlib.sha256(str(approval_token).encode("utf-8")).hexdigest()
         append_event(root, {"type": "approval_presented", "slice_id": slice_id, "approval_id": f"APR-{approval_digest[:16]}", "approval_digest": "sha256:" + approval_digest})
 
@@ -231,12 +304,28 @@ def execute_slice(run_dir: str | Path, slice_id: str, *, runtime_context: Any = 
         raise
     statuses = {item.get("status") for item in facts}
     slice_status = "error" if statuses & {"error"} else "failed" if statuses & {"failed", "blocked"} else "passed"
+    pending_objects = sorted({
+        str(item.get("object_id"))
+        for item in load_resources(root).get("objects") or []
+        if isinstance(item, dict) and item.get("object_id") and item.get("cleanup_status") == "pending"
+    })
     append_event(root, {"type": "slice_finished", "slice_id": slice_id, "status": slice_status})
     updates: dict[str, Any] = {"completed_slices": sorted(completed | {slice_id}), "next_slice_id": None, "status": "ready" if slice_status == "passed" else "blocked", "phase": "reducing" if slice_status == "passed" and slice_spec.get("type") == "reduce" else "executing", "last_action": "execute_slice", "next_action": "reduce" if slice_status == "passed" and slice_spec.get("type") == "reduce" else "execute_slice"}
+    if pending_objects:
+        # Register the obligation instead of blocking the run: a blocked run could
+        # never reach its own cleanup slice, leaving the residual object forever.
+        existing = set(load_state(root).get("pending_cleanup") or [])
+        updates["pending_cleanup"] = sorted(existing | set(pending_objects))
+        if updates["next_action"] != "reduce":
+            updates["next_action"] = "cleanup"
+        append_event(root, {"type": "cleanup_obligation_registered", "slice_id": slice_id, "object_ids": pending_objects})
+    elif slice_spec.get("type") == "cleanup" and slice_status == "passed":
+        # Every registered object is now settled; release the gate explicitly.
+        updates["pending_cleanup"] = []
     if produced_variables:
         updates["non_sensitive_variables"] = _safe_variables(produced_variables, set(sensitive_variables or set()))
     update_state(root, updates)
-    return {"status": slice_status, "slice_id": slice_id, "facts": facts, "sensitive_variables_persisted": False}
+    return {"status": slice_status, "slice_id": slice_id, "facts": facts, "pending_cleanup": updates.get("pending_cleanup", []), "sensitive_variables_persisted": False}
 
 
 def replay_volatile_sources(run_dir: str | Path, *, task_executor=None, runtime_context: Any = None) -> dict[str, Any]:

@@ -6,6 +6,13 @@
 
 正式需求报告必须由 `scripts/render_requirement_report.py` 从结构化 `requirement-report.json` 确定性生成，不得由 Agent 自由拼接 HTML。
 
+清单来源固定为 `scripts/run_orchestrator.py` 的两个投影函数，不允许手工编写：
+
+- `build_requirement_manifest(run_dir)`：单个已归约 Run 的投影，用于运行级清单。
+- `build_requirement_manifest_for_runs([run_dir...])`：多 Run 的 `current` 投影，`report_id` 固定为 `AR-<requirement-id>-CURRENT`，内部消费 `requirement_aggregation` 的 `current_cases`/`defects`/`residual_risks`，不在主 Agent 侧重算。
+
+`release_recommendation` 必须与报告总体结论由同一组 AC 事实推导，禁止用单次运行 verdict 直接替代；两者不一致的清单视为无效。
+
 ## 2. 文件布局
 
 ```text
@@ -127,6 +134,8 @@
 
 需求报告只做索引。认证头、令牌、密码及未脱敏响应不得进入清单或报告。
 
+报告器在渲染前校验证据引用：`evidence_runs` 声明了 `result_path` / `report_path` 时，对应文件必须存在（相对路径自 manifest 目录逐级向上解析）；`kind=business_execution` 的运行必须声明 `result_path`，且该文件应能通过 `panda-ai-api-tester-v2` 的 `validate_result.py`。无法通过校验的运行只能标记 `result_source=manual` 并降级为参考证据，不得支撑任何 `passed` 结论。
+
 ## 8. 总体结论
 
 报告器按以下优先级计算：
@@ -137,3 +146,31 @@
 4. 其余情况 → `INCONCLUSIVE`。
 
 不得仅依据某次运行的 verdict 直接代替需求级结论。
+
+## 9. 确定性契约
+
+正式报告必须是 manifest 的纯函数产物：同一份 `requirement-report.json` 在任何时间、任何机器、任何时区、任何换行习惯下渲染出的字节完全一致。做不到这一点的产物只能算草稿，不得作为验收证据引用。
+
+| 维度 | 约束 |
+|---|---|
+| 生成时间 | 只能取自 manifest 的 `generated_at`；缺失时输出「未标注」占位，禁止读取系统时钟 |
+| 时区 | 禁止调用 `astimezone()` 等本地化 API，禁止写入本地时区偏移 |
+| 换行符 | 恒写 `\n`（`open(..., newline="\n")`），禁止随平台输出 CRLF |
+| 排序 | 列表按 `id` 稳定排序，禁止依赖 `dict` / `set` 遍历顺序 |
+| 模板 | 产物需可追溯 `template_id` 与 `template_version`；修改模板必须递增版本，不得原地改已发布模板 |
+| 身份 | 报告应能回答「由哪份 manifest、哪版模板、哪个渲染器生成」 |
+
+门禁（CI 必过）：
+
+1. 同一 manifest 连续渲染两次，字节相等。
+2. `TZ=UTC` / `TZ=Asia/Shanghai` / `TZ=America/New_York` 下渲染结果字节相等。
+3. 产物不含 `\r\n`。
+4. golden manifest 的渲染结果与快照 diff 为空。
+
+模板只允许存在一份权威实现。其他入口若仍需保留，必须降级为转发到该实现的适配器，不得内联复制模板或样式。
+
+设计令牌同受单一来源约束：全部报告渲染器从 `panda-report-theme/report-base.css` 加载共享令牌与基础样式（构建时内联，保证离线可打开），禁止在模板中重新定义 `:root` 令牌。主题文件缺失时渲染器必须报错拒绝渲染，不得静默降级；产物 footer 必须记录 `template_id@template_version` 与 `base-css:<sha256 前 12 位>`。可用 `PANDA_REPORT_THEME` 环境变量覆盖主题文件路径。令牌变更等价于模板变更，必须递增引用方 `template_version`。
+
+`generated_at` 由 manifest 维护方在首次生成时写入（执行时刻一次定稿），此后不再修改——它属于 manifest 内容身份的一部分，不是渲染期信息。重渲染只能复用该值。
+
+

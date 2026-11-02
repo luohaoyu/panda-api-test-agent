@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Shared entry state model for the three API test entry points.
+"""Shared entry state envelope for the four API test entry points.
 
-This module is side-effect free. Durable state is written by the run-state
-module; this module only creates and validates the state envelope used by the
-conversation-facing orchestrator.
+This module is side-effect free. It normalizes and validates the review
+envelope and phase vocabulary; the durable run state (``status``,
+``completed_slices``, cleanup) is written by the L2 ``run_state`` module. Keep
+the two models distinct: ``phase`` says where the flow is, ``review_status``
+decides whether anything may execute.
 """
 from __future__ import annotations
 

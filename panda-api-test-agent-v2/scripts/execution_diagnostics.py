@@ -66,13 +66,60 @@ def _review_fields(review: dict[str, Any], scope: list[str]) -> list[str]:
     return list(scope)
 
 
-def _has_blocking_gaps(design: dict[str, Any]) -> list[str]:
-    gaps = design.get("known_gaps") or []
-    return [
-        str(item.get("gap_id") or item.get("description") or "unknown-gap")
-        for item in gaps
-        if isinstance(item, dict) and item.get("blocking") is True
-    ]
+_GAP_SCOPE_KEYS = ("acceptance_refs", "requirement_refs", "case_refs")
+
+
+def _gap_refs(gap: dict[str, Any]) -> set[str]:
+    refs: set[str] = set()
+    for key in _GAP_SCOPE_KEYS:
+        value = gap.get(key)
+        if isinstance(value, list):
+            refs.update(item for item in value if isinstance(item, str) and item)
+    if isinstance(gap.get("ac_id"), str) and gap["ac_id"]:
+        refs.add(gap["ac_id"])
+    return refs
+
+
+def _scope_refs(design: dict[str, Any], scope: list[str]) -> set[str]:
+    cases = {
+        item.get("case_id"): item
+        for item in (design.get("cases") or design.get("tasks") or [])
+        if isinstance(item, dict) and item.get("case_id")
+    }
+    refs: set[str] = set()
+    for case_id in scope:
+        case = cases.get(case_id) or {}
+        for key in ("acceptance_refs", "requirement_refs"):
+            value = case.get(key)
+            if isinstance(value, list):
+                refs.update(item for item in value if isinstance(item, str) and item)
+        if isinstance(case.get("ac_id"), str) and case["ac_id"]:
+            refs.add(case["ac_id"])
+    return refs
+
+
+def _split_blocking_gaps(design: dict[str, Any], scope: list[str]) -> tuple[list[str], list[str]]:
+    """Split blocking gaps into those that stop this run and those that do not.
+
+    A gap only blocks the work it actually covers: gaps that declare case/AC
+    references block when they intersect the approved scope, and gaps that
+    declare nothing are treated as global and still block. This keeps the
+    documented "局部阻断" rule true instead of turning every blocking gap into a
+    whole-requirement stop.
+    """
+    scoped = _scope_refs(design, scope)
+    blocking: list[str] = []
+    deferred: list[str] = []
+    for gap in design.get("known_gaps") or []:
+        if not isinstance(gap, dict) or gap.get("blocking") is not True:
+            continue
+        gap_id = str(gap.get("gap_id") or gap.get("description") or "unknown-gap")
+        refs = _gap_refs(gap)
+        if not refs or refs & scoped:
+            blocking.append(gap_id)
+        else:
+            deferred.append(gap_id)
+    return blocking, deferred
 
 
 def _execution_dependency_issues(design: dict[str, Any], scope: list[str]) -> list[dict[str, Any]]:
@@ -164,6 +211,7 @@ def diagnose_design(
         }
 
     issues: list[dict[str, Any]] = []
+    deferred_gaps: list[str] = []
     review = design.get("review") if isinstance(design.get("review"), dict) else {}
     status = review.get("status") or "pending_review"
     case_ids = _case_ids(design)
@@ -286,7 +334,7 @@ def diagnose_design(
                 next_action="bind only the current target's project, test_config, contract, environment and risk assets; do not use legacy config as a fallback",
             ))
 
-        blocking_gaps = _has_blocking_gaps(design)
+        blocking_gaps, deferred_gaps = _split_blocking_gaps(design, scope)
         if blocking_gaps:
             issues.append(_issue(
                 "DESIGN_BLOCKING_GAPS_PRESENT",
@@ -330,6 +378,7 @@ def diagnose_design(
         "phase": "pre_execution",
         "issues": copy.deepcopy(issues),
         "auto_actions": list(dict.fromkeys(auto_actions)),
+        "deferred_gaps": list(deferred_gaps),
         "next_action": next_action,
         "execution_allowed": result_status == "ready",
     }

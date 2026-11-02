@@ -3,10 +3,35 @@ import argparse
 import hashlib
 import html
 import json
+import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+TEMPLATE_ID = "panda-run-report"
+TEMPLATE_VERSION = "1.2.0"  # 1.2.0: 用例卡片嵌入脱敏后的原始请求/响应摘要（路线B）
+
+
+def _load_report_base_css():
+    """加载共享报告主题（单一来源）。缺失时报错拒绝渲染，不允许静默降级。"""
+    override = os.environ.get("PANDA_REPORT_THEME")
+    candidates = [Path(override)] if override else []
+    candidates.append(Path(__file__).resolve().parents[2] / "panda-report-theme" / "report-base.css")
+    for path in candidates:
+        if path.is_file():
+            css = path.read_text(encoding="utf-8").strip()
+            if css:
+                return css
+    raise RuntimeError(
+        "未找到共享报告主题 report-base.css；请将 panda-report-theme 安装到技能同级目录，"
+        "或通过 PANDA_REPORT_THEME 环境变量指定文件路径")
+
+
+BASE_CSS = _load_report_base_css()
+BASE_CSS_SHA256 = hashlib.sha256(BASE_CSS.encode("utf-8")).hexdigest()
 
 
 STATUS_LABELS = {
@@ -98,6 +123,154 @@ def classification_badge(value):
     if not value:
         return '<span class="quiet">未分类</span>'
     return f'<span class="classification">{esc(CLASSIFICATION_LABELS.get(value, value))}</span>'
+
+
+SENSITIVE_HEADER_RE = re.compile(
+    r"authorization|cookie|proxy-authorization|api-?key|token|secret|password", re.I)
+SENSITIVE_BODY_KEY_RE = re.compile(
+    r"^(authorization|auth|token|access_?token|refresh_?token|id_?token|secret|password|passwd|pwd|api_?key|cookie|set-?cookie|credential)s?$", re.I)
+MAX_EMBED_CHARS = 1600
+
+
+def _redact_json(obj):
+    """递归遮蔽敏感键的值；键名保留，值替换为 ***。"""
+    if isinstance(obj, dict):
+        return {
+            key: ("***" if SENSITIVE_HEADER_RE.search(str(key)) or SENSITIVE_BODY_KEY_RE.search(str(key))
+                  else _redact_json(value))
+            for key, value in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_redact_json(item) for item in obj]
+    return obj
+
+
+def _render_payload(body):
+    """把请求/响应体转为脱敏后的展示文本，超长截断并标注。"""
+    if body is None:
+        return None
+    if isinstance(body, (dict, list)):
+        text = json.dumps(_redact_json(body), ensure_ascii=False, indent=2)
+    else:
+        text = str(body)
+    if len(text) > MAX_EMBED_CHARS:
+        text = text[:MAX_EMBED_CHARS] + f"\n…（已截断，完整内容见证据文件，原始长度 {len(text)} 字符）"
+    return text
+
+
+def _normalize_runner_exchange(exchange, label):
+    """把 runner 写入 evidence 的 exchange 结构转为展示模型。"""
+    if not isinstance(exchange, dict):
+        return None
+    headers = exchange.get("request_headers")
+    if isinstance(headers, dict):
+        headers = {k: ("***" if SENSITIVE_HEADER_RE.search(str(k)) else v) for k, v in headers.items()}
+    resp_headers = exchange.get("response_headers")
+    if isinstance(resp_headers, dict):
+        resp_headers = {k: ("***" if SENSITIVE_HEADER_RE.search(str(k)) else v) for k, v in resp_headers.items()}
+    return {
+        "label": label,
+        "method": exchange.get("method"),
+        "url": exchange.get("url"),
+        "headers": headers,
+        "request_body": _render_payload(exchange.get("request_body")),
+        "http": exchange.get("status"),
+        "elapsed_ms": exchange.get("elapsed_ms"),
+        "response_body": _render_payload(exchange.get("response_body")),
+        "response_headers": resp_headers,
+    }
+
+
+def load_http_exchanges(result_path, case_id, evidence_refs=None):
+    """加载用例的原始请求/响应流水（脱敏后）。
+
+    支持两种证据约定，按优先级：
+    1. runner 约定：case.evidence_refs 指向 evidence/*.json，payload 含 exchange 字段；
+    2. 流水约定：evidence/<case_id>.jsonl，每行 {request, response}。
+    两者都缺失返回 None；解析失败抛出由调用方兜底。"""
+    base = Path(result_path).parent
+    exchanges = []
+    for ref in evidence_refs or []:
+        candidate = base / str(ref)
+        if not candidate.is_file():
+            continue
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+        for key, label in (("exchange", "主请求"), ("verification_exchange", "只读复核")):
+            item = _normalize_runner_exchange(payload.get(key), label)
+            if item:
+                exchanges.append(item)
+    if exchanges:
+        return exchanges
+
+    candidate = base / "evidence" / f"{case_id}.jsonl"
+    if not candidate.is_file():
+        return None
+    for line in candidate.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        record = json.loads(line)
+        req = record.get("request") or {}
+        resp = record.get("response") or {}
+        headers = req.get("headers")
+        if isinstance(headers, dict):
+            headers = {k: ("***" if SENSITIVE_HEADER_RE.search(str(k)) else v)
+                       for k, v in headers.items()}
+        exchanges.append({
+            "ts": record.get("ts"),
+            "method": req.get("method"),
+            "path": req.get("path"),
+            "headers": headers,
+            "request_body": _render_payload(req.get("body")),
+            "http": resp.get("http"),
+            "elapsed_ms": resp.get("elapsed_ms"),
+            "response_body": _render_payload(resp.get("body")),
+        })
+    return exchanges
+
+
+def render_http_exchanges(exchanges):
+    """渲染脱敏请求/响应摘要块；error 形态渲染失败说明。"""
+    if not exchanges:
+        return ""
+    blocks = []
+    for item in exchanges:
+        if item.get("error"):
+            blocks.append(f'<div class="http-exchange"><p class="quiet">{esc(item["error"])}</p></div>')
+            continue
+        meta = []
+        if item.get("label"):
+            meta.append(esc(item["label"]))
+        if item.get("http") is not None:
+            meta.append(f"HTTP {esc(item['http'])}")
+        if item.get("elapsed_ms") is not None:
+            meta.append(f"{esc(item['elapsed_ms'])}ms")
+        if item.get("ts"):
+            meta.append(esc(item["ts"]))
+        target = item.get("url") or item.get("path") or "-"
+        lines = [
+            '<div class="http-exchange">',
+            '<div class="http-line">'
+            f'<span class="method">{esc(item.get("method") or "-")}</span>'
+            f'<code>{esc(target)}</code>'
+            f'<span class="quiet">{" · ".join(meta)}</span>'
+            '</div>',
+        ]
+        if item.get("headers"):
+            lines.append(f'<pre class="payload">请求头：{esc(json.dumps(item["headers"], ensure_ascii=False))}</pre>')
+        if item.get("request_body"):
+            lines.append(f'<pre class="payload">请求体：{esc(item["request_body"])}</pre>')
+        if item.get("response_headers"):
+            lines.append(f'<pre class="payload">响应头：{esc(json.dumps(item["response_headers"], ensure_ascii=False))}</pre>')
+        if item.get("response_body"):
+            lines.append(f'<pre class="payload">响应体：{esc(item["response_body"])}</pre>')
+        lines.append('</div>')
+        blocks.append("".join(lines))
+    return (
+        '<h4>原始请求/响应（脱敏摘要）</h4>'
+        f'<div class="http-exchanges">{"".join(blocks)}</div>'
+        '<p class="quiet">敏感字段已遮蔽，超长内容已截断；完整原文以证据文件为准（sha256 可验）。</p>'
+    )
 
 
 def evidence_links(refs):
@@ -359,6 +532,7 @@ def render_case_cards(cases):
             '<h4>断言结果</h4>'
             f'{assertion_rows(case.get("assertions") or [])}'
             f'<div class="case-evidence"><span>证据文件</span>{evidence}</div>'
+            f'{render_http_exchanges(case.get("http_exchanges"))}'
             '</div>'
             '</details>'
             '</article>'
@@ -436,6 +610,11 @@ def main():
     cleanup = data.get("cleanup", {})
     gates = data.get("gate_results", [])
     cases = data.get("case_results", [])
+    for case in cases:
+        try:
+            case["http_exchanges"] = load_http_exchanges(result_path, case.get("case_id"), case.get("evidence_refs"))
+        except Exception as exc:  # 证据流水损坏不阻断报告，降级为可见说明
+            case["http_exchanges"] = [{"error": f"证据流水解析失败：{exc}"}]
     known_gaps = data.get("known_gaps", [])
     contract = data.get("contract", {})
     requirement_trace = data.get("requirement_trace", {})
@@ -485,7 +664,7 @@ def main():
 <meta name="color-scheme" content="light">
 <title>{esc(data.get("run_id"))} 接口测试报告</title>
 <style>
-:root{{--ink:#182033;--muted:#667085;--soft:#98a2b3;--line:#e6eaf0;--panel:#ffffff;--canvas:#f3f6fa;--navy:#15253f;--blue:#3867d6;--blue-soft:#edf3ff;--green:#16835b;--green-soft:#e9f8f1;--red:#c23a43;--red-soft:#fff0f1;--amber:#b06b00;--amber-soft:#fff7e6;--shadow:0 12px 35px rgba(19,35,61,.08);font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;color:var(--ink);background:var(--canvas);line-height:1.55}}
+:root{{background:var(--canvas);line-height:1.55}}__PANDA_REPORT_BASE_CSS__
 *{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:var(--canvas)}}a{{color:inherit}}code{{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace}}.shell{{max-width:1240px;margin:0 auto;padding:34px 28px 64px}}.hero{{position:relative;overflow:hidden;background:linear-gradient(135deg,#14243e 0%,#203a67 58%,#315ca8 100%);color:#fff;border-radius:24px;padding:32px 34px 30px;box-shadow:0 22px 55px rgba(21,37,63,.2)}}.hero:after{{content:"";position:absolute;right:-90px;top:-150px;width:420px;height:420px;border:1px solid rgba(255,255,255,.15);border-radius:50%;box-shadow:0 0 0 58px rgba(255,255,255,.045),0 0 0 116px rgba(255,255,255,.025)}}.hero-top,.hero-main,.hero-meta{{position:relative;z-index:1}}.eyebrow{{display:flex;align-items:center;gap:10px;font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:#c9d6ed;font-weight:700}}.eyebrow:before{{content:"";width:28px;height:2px;background:#8fb5ff}}.hero-main{{display:flex;align-items:flex-end;justify-content:space-between;gap:30px;margin-top:22px}}.hero h1{{font-size:36px;line-height:1.15;margin:0 0 10px;letter-spacing:-.02em}}.hero-subtitle{{margin:0;color:#d8e2f3;font-size:14px}}.verdict{{min-width:300px;padding:17px 19px;border-radius:16px;border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.1);backdrop-filter:blur(8px)}}.verdict span{{display:block;font-size:11px;letter-spacing:.14em;color:#c9d6ed;font-weight:700}}.verdict strong{{display:block;font-size:30px;line-height:1.1;margin:4px 0 7px}}.verdict p{{margin:0;color:#e3eaf6;font-size:13px}}.verdict-passed strong{{color:#71e0b5}}.verdict-failed strong,.verdict-error strong{{color:#ff9ca3}}.verdict-blocked strong,.verdict-partial strong{{color:#ffd37a}}.hero-meta{{display:flex;flex-wrap:wrap;gap:10px;margin-top:26px}}.hero-meta span{{font-size:12px;color:#dbe5f4;background:rgba(255,255,255,.09);border:1px solid rgba(255,255,255,.12);padding:6px 10px;border-radius:8px}}.hero-meta code{{color:#fff}}
 .section-nav{{position:sticky;top:12px;z-index:5;display:flex;gap:5px;margin:18px 0;padding:6px;background:rgba(255,255,255,.88);border:1px solid rgba(225,230,237,.95);border-radius:14px;box-shadow:0 8px 25px rgba(31,48,76,.08);backdrop-filter:blur(12px);overflow:auto}}.section-nav a{{white-space:nowrap;text-decoration:none;color:#566176;font-size:12px;font-weight:650;padding:8px 12px;border-radius:9px}}.section-nav a:hover{{color:var(--blue);background:var(--blue-soft)}}
 .metrics{{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:18px 0}}.metric{{background:var(--panel);border:1px solid var(--line);border-radius:15px;padding:16px 17px;box-shadow:0 5px 18px rgba(25,43,70,.04)}}.metric span{{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}}.metric strong{{font-size:25px;line-height:1.15;letter-spacing:-.02em}}.metric small{{display:block;color:var(--soft);font-size:11px;margin-top:5px}}.metric.metric-pass strong{{color:var(--green)}}.metric.metric-fail strong{{color:var(--red)}}.metric.metric-warn strong{{color:var(--amber)}}
@@ -493,7 +672,7 @@ def main():
 .info-grid{{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid var(--line);border-radius:14px;overflow:hidden}}.info-item{{padding:15px 17px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);min-width:0}}.info-item:nth-child(3n){{border-right:0}}.info-item:nth-last-child(-n+3){{border-bottom:0}}.info-item span,.compare-grid span,.result-meta>div>span,.case-evidence>span,.cleanup-state>span,.cleanup-pending>span{{display:block;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;margin-bottom:5px}}.info-item strong,.info-item code{{font-size:13px;word-break:break-all}}
 .progress-wrap{{display:grid;grid-template-columns:180px 1fr;align-items:center;gap:22px;padding:19px;border:1px solid var(--line);border-radius:15px;background:#fbfcfe;margin-bottom:16px}}.rate strong{{display:block;font-size:31px;line-height:1;color:var(--green)}}.rate span{{font-size:12px;color:var(--muted)}}.progress-bar{{height:12px;border-radius:99px;background:#e8edf3;overflow:hidden}}.progress-bar i{{display:block;height:100%;width:{progress_width};background:linear-gradient(90deg,#16835b,#43b889);border-radius:inherit}}.progress-caption{{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;margin-top:7px}}
 .result-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}}.result-card,.case-card{{position:relative;border:1px solid var(--line);border-radius:15px;overflow:hidden;background:#fff}}.result-card:before,.case-card:before{{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:#9aa5b5}}.tone-passed:before{{background:var(--green)}}.tone-failed:before,.tone-error:before{{background:var(--red)}}.tone-not_run:before,.tone-skipped:before{{background:var(--amber)}}.result-card{{padding:17px 18px 16px 21px}}.result-head,.case-summary{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}}.result-index{{display:flex;gap:7px;align-items:center}}.result-index span,.tag{{font-size:10px;font-weight:800;letter-spacing:.07em;color:var(--blue);background:var(--blue-soft);padding:3px 6px;border-radius:5px}}.result-index code{{font-size:12px;color:#45526a}}.result-status{{display:flex;gap:6px;align-items:center}}.tag.subtle{{color:#697386;background:#f1f3f6}}.result-card h3{{font-size:15px;margin:14px 0 5px}}.actual{{font-size:13px;color:#566176;margin:0;min-height:40px}}.result-meta{{display:grid;grid-template-columns:100px 1fr;gap:12px;border-top:1px solid var(--line);margin-top:14px;padding-top:12px}}.classification{{display:inline-flex;color:#44516a;background:#f1f4f7;border-radius:6px;padding:3px 7px;font-size:11px;font-weight:650}}.quiet{{color:var(--soft);font-size:11px}}.status{{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;border-radius:99px;padding:4px 9px;font-size:11px;font-weight:750}}.status i{{width:6px;height:6px;border-radius:50%;background:currentColor}}.status-passed{{color:var(--green);background:var(--green-soft)}}.status-failed,.status-error{{color:var(--red);background:var(--red-soft)}}.status-skipped,.status-not_run{{color:var(--amber);background:var(--amber-soft)}}.status-not_required,.status-none{{color:#546176;background:#eef1f5}}.status-unknown{{color:#546176;background:#eef1f5}}.evidence-list{{display:flex;flex-wrap:wrap;gap:5px}}.evidence-link{{display:inline-flex;align-items:center;gap:5px;max-width:100%;color:#35558f;text-decoration:none;font-size:10px;background:#f4f7fc;border:1px solid #e2e9f5;border-radius:6px;padding:4px 6px}}.evidence-link span{{font-size:8px;font-weight:800;color:#fff;background:#5275b6;border-radius:3px;padding:1px 3px}}.evidence-link:hover{{border-color:#9eb6df;background:#edf3ff}}
-.case-list{{display:grid;gap:11px}}.case-card{{padding-left:4px}}.case-summary{{padding:17px 18px 14px}}.case-number{{font-size:22px;font-weight:800;color:#d2d8e1;line-height:1}}.case-title{{flex:1;min-width:0}}.case-title>div{{display:flex;align-items:center;gap:8px}}.case-title code{{font-size:11px;color:#536078}}.case-title h3{{font-size:15px;margin:5px 0 0}}.case-status{{display:flex;flex-direction:column;align-items:flex-end;gap:5px}}.case-status small{{font-size:10px;color:var(--soft)}}.compare-grid{{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:#fbfcfe}}.compare-grid>div{{padding:13px 18px}}.compare-grid>div+div{{border-left:1px solid var(--line)}}.compare-grid p{{font-size:12px;color:#46536a;margin:0}}.blocked-row{{display:flex;gap:7px;align-items:center;padding:10px 18px;background:var(--amber-soft);font-size:11px;color:var(--amber)}}.blocked-row code{{background:#fff3d2;padding:2px 5px;border-radius:4px}}details summary{{display:flex;justify-content:space-between;align-items:center;cursor:pointer;padding:11px 18px;color:#536078;font-size:11px;font-weight:700;list-style:none}}details summary::-webkit-details-marker{{display:none}}details[open] .details-hint{{font-size:0}}details[open] .details-hint:after{{content:"收起";font-size:10px}}.details-hint{{color:var(--blue);font-size:10px}}.details-body{{border-top:1px solid var(--line);padding:14px 18px 17px}}.assertion-list{{border:1px solid var(--line);border-radius:10px;overflow:hidden}}.assertion-row{{display:grid;grid-template-columns:1.25fr 1fr 1fr auto;align-items:center;gap:12px;padding:10px 12px;font-size:11px}}.assertion-row+.assertion-row{{border-top:1px solid var(--line)}}.assertion-row strong{{display:block;font-size:11px}}.assertion-row small{{color:var(--soft)}}.assertion-row span{{display:block;color:var(--soft);font-size:9px;text-transform:uppercase}}.assertion-row code{{word-break:break-word}}.case-evidence{{display:grid;grid-template-columns:90px 1fr;gap:10px;margin-top:12px;align-items:start}}
+.case-list{{display:grid;gap:11px}}.case-card{{padding-left:4px}}.case-summary{{padding:17px 18px 14px}}.case-number{{font-size:22px;font-weight:800;color:#d2d8e1;line-height:1}}.case-title{{flex:1;min-width:0}}.case-title>div{{display:flex;align-items:center;gap:8px}}.case-title code{{font-size:11px;color:#536078}}.case-title h3{{font-size:15px;margin:5px 0 0}}.case-status{{display:flex;flex-direction:column;align-items:flex-end;gap:5px}}.case-status small{{font-size:10px;color:var(--soft)}}.compare-grid{{display:grid;grid-template-columns:1fr 1fr;border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:#fbfcfe}}.compare-grid>div{{padding:13px 18px}}.compare-grid>div+div{{border-left:1px solid var(--line)}}.compare-grid p{{font-size:12px;color:#46536a;margin:0}}.blocked-row{{display:flex;gap:7px;align-items:center;padding:10px 18px;background:var(--amber-soft);font-size:11px;color:var(--amber)}}.blocked-row code{{background:#fff3d2;padding:2px 5px;border-radius:4px}}details summary{{display:flex;justify-content:space-between;align-items:center;cursor:pointer;padding:11px 18px;color:#536078;font-size:11px;font-weight:700;list-style:none}}details summary::-webkit-details-marker{{display:none}}details[open] .details-hint{{font-size:0}}details[open] .details-hint:after{{content:"收起";font-size:10px}}.details-hint{{color:var(--blue);font-size:10px}}.details-body{{border-top:1px solid var(--line);padding:14px 18px 17px}}.assertion-list{{border:1px solid var(--line);border-radius:10px;overflow:hidden}}.assertion-row{{display:grid;grid-template-columns:1.25fr 1fr 1fr auto;align-items:center;gap:12px;padding:10px 12px;font-size:11px}}.assertion-row+.assertion-row{{border-top:1px solid var(--line)}}.assertion-row strong{{display:block;font-size:11px}}.assertion-row small{{color:var(--soft)}}.assertion-row span{{display:block;color:var(--soft);font-size:9px;text-transform:uppercase}}.assertion-row code{{word-break:break-word}}.case-evidence{{display:grid;grid-template-columns:90px 1fr;gap:10px;margin-top:12px;align-items:start}}.http-exchange{{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0;background:#fbfcfe}}.http-line{{display:flex;gap:8px;align-items:center;font-size:11px;margin-bottom:6px;flex-wrap:wrap}}.http-line .method{{font-weight:800;color:var(--blue)}}pre.payload{{margin:4px 0;white-space:pre-wrap;word-break:break-word;font-family:"SFMono-Regular",Consolas,monospace;font-size:10px;color:#44516a;background:#fff;border:1px solid var(--line);border-radius:6px;padding:8px;max-height:240px;overflow:auto}}
 .traceability-row{{display:flex;flex-wrap:wrap;gap:8px;padding:9px 18px;border-top:1px solid var(--line);background:#f7f9fc}}.traceability-row span{{font-size:10px;color:#526079;background:#fff;border:1px solid var(--line);border-radius:6px;padding:3px 7px}}.details-body h4{{font-size:12px;margin:2px 0 9px}}.details-body h4:not(:first-child){{margin-top:16px}}.trace-list{{display:grid;gap:0;border:1px solid var(--line);border-radius:13px;overflow:hidden}}.trace-step{{display:grid;grid-template-columns:32px minmax(0,1fr) auto;align-items:start;gap:11px;padding:11px 13px;background:#fff}}.trace-step+.trace-step{{border-top:1px solid var(--line)}}.trace-seq{{display:flex;align-items:center;justify-content:center;width:27px;height:27px;border-radius:8px;background:var(--navy);color:#fff;font-size:10px;font-weight:800}}.trace-copy strong{{display:block;font-size:12px}}.trace-copy small{{display:block;color:var(--muted);font-size:10px;margin-top:2px;word-break:break-word}}.trace-copy .evidence-list{{margin-top:6px}}.trace-list.compact .trace-step{{padding:9px 11px}}.coverage-cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;margin-bottom:13px}}.coverage-card{{display:flex;justify-content:space-between;gap:14px;border:1px solid var(--line);border-radius:12px;padding:14px 15px;background:#fbfcfe}}.coverage-card code{{font-size:10px;color:var(--blue)}}.coverage-card strong{{display:block;font-size:13px;margin:3px 0}}.coverage-card p{{margin:0;color:var(--muted);font-size:11px}}.table-wrap{{overflow:auto;border:1px solid var(--line);border-radius:13px}}.coverage-table{{width:100%;border-collapse:collapse;font-size:11px;min-width:1000px}}.coverage-table th{{text-align:left;background:#f5f7fa;color:#5d687c;font-size:10px;letter-spacing:.04em;text-transform:uppercase;padding:10px;border-bottom:1px solid var(--line)}}.coverage-table td{{vertical-align:top;padding:11px 10px;border-bottom:1px solid var(--line)}}.coverage-table tr:last-child td{{border-bottom:0}}.coverage-table td strong{{display:block;font-size:11px;margin-top:4px}}.coverage-table td p{{margin:4px 0 0;color:var(--muted)}}.trace-assertions{{font-family:Consolas,monospace;color:#536078;word-break:break-word}}.cleanup-overview{{display:grid;grid-template-columns:1.3fr 1fr;border:1px solid var(--line);border-radius:14px;overflow:hidden}}.cleanup-state,.cleanup-pending{{padding:17px 18px}}.cleanup-pending{{border-left:1px solid var(--line)}}.cleanup-state p{{font-size:12px;color:var(--muted);margin:9px 0 0}}.cleanup-pending ul,.gap-list{{margin:3px 0 0;padding-left:18px;font-size:12px;color:#536078}}.all-clear{{color:var(--green)}}.cleanup-actions{{display:grid;gap:7px;margin-top:10px}}.cleanup-action{{display:grid;grid-template-columns:1fr auto auto 2fr;align-items:center;gap:12px;border:1px solid var(--line);border-radius:10px;padding:9px 12px;font-size:11px}}.empty-state{{border:1px dashed #d4dae3;background:#fafbfd;color:var(--soft);border-radius:12px;padding:24px;text-align:center;font-size:12px}}.empty-state.compact{{padding:11px}}
 .footer{{display:flex;justify-content:space-between;gap:20px;padding:22px 4px 0;color:#7b879a;font-size:11px}}.footer code{{color:#536078}}.print-note{{display:none}}
 @media(max-width:900px){{.metrics{{grid-template-columns:repeat(3,1fr)}}.hero-main{{align-items:flex-start;flex-direction:column}}.verdict{{min-width:0;width:100%}}.info-grid{{grid-template-columns:repeat(2,1fr)}}.info-item:nth-child(3n){{border-right:1px solid var(--line)}}.info-item:nth-child(2n){{border-right:0}}.info-item:nth-last-child(-n+3){{border-bottom:1px solid var(--line)}}.info-item:nth-last-child(-n+2){{border-bottom:0}}.result-grid{{grid-template-columns:1fr}}}}
@@ -582,13 +761,15 @@ def main():
   <div class="section-head"><div class="section-title"><span class="section-number">08</span><div><h2>已知覆盖缺口</h2><p>阻塞项会阻止推进，覆盖边界仅说明本次未覆盖范围</p></div></div><span class="section-kpi">{len(known_gaps)} 项</span></div>
   <ul class="gap-list">{gap_items}</ul>
 </section>
-<footer class="footer"><span>此报告由已校验的 <code>result.json</code> 确定性生成，业务结论不由页面脚本计算。</span><span>Schema {esc(data.get("schema_version"))} · Validator {esc(validator_hash[:12])}</span></footer>
+<footer class="footer"><span>此报告由已校验的 <code>result.json</code> 确定性生成，业务结论不由页面脚本计算。</span><span>Schema {esc(data.get("schema_version"))} · Validator {esc(validator_hash[:12])} · Template {TEMPLATE_ID}@{TEMPLATE_VERSION} · base-css:{BASE_CSS_SHA256[:12]}</span></footer>
 </main>
 </body>
 </html>'''
 
+    body = body.replace("__PANDA_REPORT_BASE_CSS__", BASE_CSS)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(body, encoding="utf-8")
+    with output_path.open("w", encoding="utf-8", newline="\n") as fh:
+        fh.write(body)
     print(json.dumps({"report": str(output_path), "run_id": data.get("run_id"), "verdict": verdict, "summary": summary}, ensure_ascii=False))
     return 0
 

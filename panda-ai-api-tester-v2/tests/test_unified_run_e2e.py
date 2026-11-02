@@ -34,7 +34,7 @@ class UnifiedRunHttpE2ETests(unittest.TestCase):
             }
             plan = compile_plan(intent)
             root = Path(temp_dir) / "unified-run"
-            create_run(root, run_id="RUN-UNIFIED-STUB", plan_id=plan["plan_id"], plan_fingerprint=plan["plan_fingerprint"], environment_snapshot={"environment_id": "local-stub"}, plan=plan)
+            create_run(root, run_id="RUN-UNIFIED-STUB", plan_id=plan["plan_id"], plan_fingerprint=plan["plan_fingerprint"], environment_snapshot={"environment_id": "local-stub"}, plan=plan, entry_metadata={"entry_type": "single_api_quality", "review": {"status": "approved", "review_id": "REVIEW-E2E", "approved_case_ids": ["TC-STUB-HEALTH", "TC-STUB-ITEM"]}})
             context = build_runtime_context(package, {
                 "STUB_BASE_URL": stub.base_url,
                 "STUB_ALLOWED_ORIGINS": stub.base_url,

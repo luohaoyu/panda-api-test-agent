@@ -304,7 +304,8 @@ def compile_plan(intent: dict[str, Any]) -> dict[str, Any]:
         })
     if not any(task["type"] == "reduce" for task in tasks):
         slices.append({"slice_id": f"S{len(slices) + 1}", "type": "reduce", "task_ids": [], "execution": "serial", "approval": {"required": False, "task_ids": []}, "resource_locks": [], "volatile": False})
-    cleanup_ids = [task["task_id"] for task in tasks if task["type"] == "cleanup" or task["cleanup_required"]]
+    cleanup_ids = [task["task_id"] for task in tasks if task["type"] == "cleanup"]
+    residual_ids = [task["task_id"] for task in tasks if task["cleanup_required"] and task["type"] != "cleanup"]
     known_gaps = copy.deepcopy(intent.get("known_gaps") or [])
     plan = {
         "schema_version": "2.0",
@@ -316,7 +317,14 @@ def compile_plan(intent: dict[str, Any]) -> dict[str, Any]:
         "risk_policy": copy.deepcopy(intent.get("risk_policy") or {}),
         "tasks": tasks,
         "slices": slices,
-        "cleanup_obligations": {"task_ids": sorted(set(cleanup_ids)), "required": bool(cleanup_ids)},
+        "cleanup_obligations": {
+            # ``task_ids`` lists the cleanup tasks themselves; ``residual_task_ids``
+            # lists writers that leave objects behind. A writer passing is not proof
+            # that its object was cleaned, so the two must stay separate.
+            "task_ids": sorted(set(cleanup_ids)),
+            "residual_task_ids": sorted(set(residual_ids)),
+            "required": bool(cleanup_ids or residual_ids),
+        },
         "known_gaps": known_gaps,
     }
     plan["plan_fingerprint"] = _fingerprint(plan)

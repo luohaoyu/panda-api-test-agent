@@ -1,6 +1,8 @@
 # API Test Agent 编排规则（Schema 2.1）
 
-主 Agent 只判断、调度和聚合，不创建项目配置、不发送正式请求、不回写运行状态。`intent_router.py` 只做四类入口的本地设计路由；`single_api_quality.py` 只做单接口结构化设计。二者都不读取 secret、不发请求；任何实际执行必须经过人工审核和 L2 trusted host/Runner。用户已提供 curl 时可直接进入设计输入，不强制扫描工程。
+主 Agent 只判断、调度和聚合，不创建项目配置、不发送正式请求、不回写运行状态。`intent_router.py` 只做四类入口的本地设计路由；`single_api_quality.py`（L2）只做单接口结构化设计。二者都不读取 secret、不发请求；任何实际执行必须经过人工审核和 L2 trusted host/Runner。用户已提供 curl 时可直接进入设计输入，不强制扫描工程。
+
+依赖布局：本技能与 `panda-ai-api-tester-v2`、`panda-report-theme` 必须平级安装在同一个 skills 目录下，脚本按相对位置解析，缺失即 fail-closed 报错。
 
 ## 1. 四层资产
 
@@ -26,7 +28,7 @@
 
 配置或画像缺口必须映射到具体 `stage`、AC 或 case。只阻断依赖该缺口的项，其余项继续执行。临时 URL/Token 仅运行时注入，不写入配置。旧格式仍不能被消费或伪装为长期 Schema 2.1；如需继续当前测试，必须由 L1 依据可验证证据生成独立、可审计的临时 Schema 2.1 运行配置，不修改旧文件；正式资产由 L1 按需补齐。
 
-## 3. AI 与脚本职责边界
+## 2.1 AI 与脚本职责边界
 
 - AI/Skill 负责自然语言入口理解、工程按需扫描、业务语义解释、需求可验证性判断、测试维度选择和结果解释；项目适配层内容由 L1 负责初始化和维护，主 Agent 只负责判断和调度。
 - L1 脚本只提供可选的固定格式候选发现；其输出必须标记为候选，不等于已部署、已确认或可执行事实。
@@ -35,7 +37,14 @@
 
 ## 3. 状态模型
 
-三类业务入口统一使用 `scripts/entry_state.py` 的状态 envelope。运行状态至少保留 `entry_type`、`phase`、`review_status`、`approved_case_ids`、`design_fingerprint`、`plan_fingerprint`、`blocking_gap_ids`、`last_action`、`next_action`、`request_count_expected`、`request_count_sent`、`failure_class` 和 `verdict`。状态机不允许从 `pending_review` 直接进入 `executing`；只有当前设计的 `approved` 或 `partially_approved` 审核范围可以进入执行。`api_debug` 默认只生成一个最小复现用例，不自动扩展为质量维度；`requirement_validation` 的 `none` 验收项不生成 API 用例。
+四类入口共用两套明确分工的模型，不要混用：
+
+- **入口状态**（`scripts/entry_state.py`）：`entry_type`、`phase`、`review_status`、`approved_case_ids`、`design_fingerprint`、`plan_fingerprint`、`blocking_gap_ids`、`last_action`、`next_action`、`request_count_expected`、`request_count_sent`、`failure_class`、`verdict` 的规范化与校验。
+- **运行状态**（L2 `run_state` 持久化）：`status`（`ready`/`awaiting_approval`/`blocked`/`interrupted`/`reduced`/`reported`）、`review_status`、`completed_slices`、`pending_cleanup` 等实际落盘字段。
+
+两者关系：`phase` 只描述流程位置，**执行许可由 `review_status` 决定**。因此 `pending_review → executing` 这个 phase 跃迁在状态机上是允许的，但同一时刻若 `review_status` 不是 `approved`/`partially_approved`，执行器一律 fail-closed 阻断（`slice_blocked_unreviewed`）。不存在“phase 到了 executing 就能跑”的情况。
+
+`api_debug` 默认只生成一个最小复现用例，不自动扩展为质量维度；`requirement_validation` 的 `none` 验收项不生成 API 用例。
 
 - `config_status`：项目环境与资源声明是否正确，由 L1 维护；运行技能不得修改。
 - `profile lifecycle`：接口契约知识是否已确认且足以安全执行，由 L1 依据责任人确认维护；运行技能不得修改。
@@ -57,33 +66,37 @@
 
 ## 4. 阶段与调度
 
-所有入口先进入以下状态机：
+所有入口先进入以下流程：
 
-`intent_received -> preparing -> designing -> pending_review -> approved|partially_approved|rejected|plan_only -> executing -> reducing -> reported`
+```text
+intent_received -> preparing -> designing -> pending_review -(审核决定)-> executing -> reducing -> reported
+```
 
-- AI 生成设计后只能进入 `pending_review`，不得直接进入 `executing`。
-- `approved` 允许执行审核范围内全部具体用例；`partially_approved` 只允许执行 `approved_case_ids`。
-- `rejected` 和 `plan_only` 不得发送请求。
+`pending_review` 之后的括号不是 phase，而是 `review_status`：`approved`/`partially_approved` 才能进入 `executing`；`rejected`/`plan_only`/`expired`/`superseded` 停在原地并输出 `review_not_executable`。
+
+- AI 生成设计后只能进入 `pending_review`，不得跳过审核进入 `executing`。
+- `approved` 允许执行审核范围内全部具体用例；`partially_approved` 只允许执行 `approved_case_ids`，其余保持 `not_run`。
 - 用例、请求摘要、断言、数据依赖、副作用、环境、缺口或执行范围变化时，原审核置为 `superseded`，新设计回到 `pending_review`。
 - 设计审核与高风险动作审批分别校验，任一不满足都不得执行对应用例。
 
-v2 灰度运行入口为 `scripts/run_orchestrator.py`，主 Agent 每回合只执行一个确定性动作：
+v2 运行入口为 `scripts/run_orchestrator.py`，主 Agent 每回合只执行一个确定性动作：
 
-1. `compile_and_create_run()`：仅在下游已确定性校验设计审核后编译并创建新的统一 Run；未审核、部分批准范围无法强制收敛或编译失败时不得创建可执行运行目录。当前脚本未原生承载本版审核契约时，不得将其作为绕过审核的执行入口。
-2. `next_action()`：读取 `state.json`、校验事件账本并返回下一步动作；不得在运行期重新排序任务。
-3. `execute_slice()` 或 `execute_package_slice()`：只执行计划指定的一个切片。
-4. `reduce_run()`：从计划、事件和资源重算 `RunResult`，结果文件存在且内容不同时拒绝覆盖。
-5. `build_requirement_manifest()`：将已归约 Run 投影为需求报告清单，最终仍由固定报告器渲染。
+1. `compile_and_create_run()`：编译并创建统一 Run。已是 `approved`/`partially_approved` 时直接用规范化后的审核创建可执行 Run；`pending_review` 时创建不可执行 Run 并返回 `request_approval`；可执行但校验失败时拒绝创建。
+2. `record_review()`：把人工决定写回**同一 Run**（`pending_review` → `approved`/`partially_approved`/`rejected`…），推进 `review_status`/`status`/`next_action` 并追加 `review_recorded` 事件。fail-closed 拒绝：已 `reduced`/`reported` 的 Run、指纹不匹配、范围含未知用例、范围小于已执行用例。
+3. `next_action()`：读取 `state.json`、校验事件账本并返回下一步动作；不得在运行期重新排序任务。
+4. `execute_slice()`：只执行计划指定的一个切片。
+5. `reduce_run()`：从计划、事件和资源重算 `RunResult`，结果文件存在且内容不同时拒绝覆盖。
+6. `build_requirement_manifest()` / `build_requirement_manifest_for_runs()`：把单个/多个已归约 Run 投影为需求报告清单，最终仍由固定报告器渲染。
 
-上述入口是灰度路径；旧 TestPackage 管线仍保留为回退路径，不能在同一 Run 中混用两套调度状态。
+旧 TestPackage 管线保留为回退路径，不能在同一 Run 中混用两套调度状态。
 
-所有会发送请求的设计都增加人工审核门：先生成 TestPackage 和完整审核摘要，再进入 `pending_review`。只有审核状态为 `approved` 或 `partially_approved`，且设计指纹、具体用例范围匹配时，才允许调度请求。审核退回、仅保存计划、审核过期或设计变化时不得发送请求。`PROBE` 若会发送请求同样适用；只有纯本地静态检查可以不进入请求审核门。
+所有会发送请求的设计都受人工审核门约束（唯一规则见 `SKILL.md`「测试设计人工审核门」）：先生成 TestPackage 和完整审核摘要，再进入 `pending_review`；只有审核状态可执行且指纹、用例范围匹配时才允许调度请求。
 
 | 阶段 | 调度 | 条件 |
 |---|---|---|
 | 准备期 | `panda-l1-adapter-generator-v2` | 当前目标所需配置、画像或项目适配根目录缺失，先按需初始化、扫描和补齐；适配器只创建当前所需内容 |
 | 设计期 | `panda-ai-api-tester-v2` | 按入口生成具体用例、请求摘要、断言、数据依赖、副作用和设计指纹 |
-| `pending_review` | 主 Agent + 人工审核人 | 不发送请求；展示强制审核范围并等待审核结果 |
+| `pending_review` | 主 Agent + 人工审核人 | 不发送请求；展示强制审核范围，收到决定后调用 `record_review()` |
 | 差异确认期 | `panda-l1-adapter-generator-v2` + 责任人 | 影响当前执行的契约、环境、权限或风险范围发生变化；修改设计后重新审核 |
 | `PROBE` | `panda-ai-api-tester-v2` | 对应 probe 用例已获审核且最小 HTTP/认证输入具备 |
 | `EXECUTE` | `panda-ai-api-tester-v2` | 仅执行 `approved` 或 `partially_approved` 的具体用例；设计指纹/范围匹配且当前用例所需门禁满足 |
@@ -93,7 +106,7 @@ v2 灰度运行入口为 `scripts/run_orchestrator.py`，主 Agent 每回合只�
 
 ### 4.1 审核契约
 
-主 Agent 向下游至少传递：
+字段与别名以 `SKILL.md`「审核契约（字段唯一出处）」为准，本节只规定校验顺序。推荐写法：
 
 ```json
 {
@@ -111,17 +124,17 @@ v2 灰度运行入口为 `scripts/run_orchestrator.py`，主 Agent 每回合只�
 }
 ```
 
-执行器必须 fail-closed 校验：
+执行器（`review_adapter.canonical_review` → L2 `validate_review`）按顺序 fail-closed 校验：
 
 1. 状态只能为 `approved` 或 `partially_approved`；
-2. `design_fingerprint` 等于当前可执行设计重算值；
-3. `approved_case_ids` 非空、均存在且覆盖实际将执行的全部用例；
-4. `reviewed_fields` 至少覆盖用例、请求摘要、断言、数据依赖和副作用；
+2. 规范化后的指纹等于当前编译计划的 `plan_fingerprint`（别名解析后仍不等即视为设计已变）；
+3. `approved_case_ids`/`approved_scope` 非空、均存在于当前计划，且 `approved` 覆盖全部可执行用例、`partially_approved` 为严格子集；
+4. `reviewed_fields` 能覆盖每个获准用例（数组形式自动扇出到全部获准用例）；
 5. 审核未过期、未被新设计取代；
 6. 高风险动作仍有独立审批；
 7. 未批准用例保持 `not_run`，不能被调度器补跑或自动重试。
 
-兼容性要求：下游现有 `review_pending`、`approved_with_gaps` 和“审核范围必须覆盖包内全部用例”的契约与本版不一致。升级时应在边界层显式映射 `pending_review -> review_pending`，并将语义等价且保留明确 `approved_case_ids` 的部分批准映射为执行器支持的状态；不得仅改字符串而丢失用例级范围。推荐下游原生支持 `pending_review` 与 `partially_approved`。
+兼容性：字段别名映射已在本技能内实现（`scripts/review_adapter.py`），调用方不需要知道 L2 内部叫 `approved_scope`/`approved_at`。旧标记 `review_pending`/`approved_with_gaps` 不在支持范围内——它们丢失用例级范围，必须显式改写为 `pending_review` + `approved_case_ids` 后重新审核，不得仅改字符串放行。
 
 ## 5. TestPackage 绑定
 
@@ -156,6 +169,13 @@ Runner 禁止自动重试。连接中断、超时、5xx、写请求结果未知�
 需求 AC、固定 Commit、专项接口、数据矩阵、SLA 和外部隔离要求来自需求 context，不从 `test-config.md` 推断。需求报告只纳入已校验 result 和明确人工判定，门禁/造数不计 AC 通过。
 
 同一需求多个运行时：固定 AC 分母，映射到用例与 Oracle，分别计算执行触达率、完整场景覆盖率和验收通过率；缺陷与测试缺口分开。
+
+生成路径固定为两步，不允许主 Agent 手工拼清单：
+
+1. `build_requirement_manifest_for_runs([run_dir...])` 读取 `requirement_aggregation` 的 `current` 投影（含 `current_cases`、`defects`、`residual_risks`、`external_evidence`），产出 `schema_version=1.0` 的报告清单；`report_id` 固定为 `AR-<requirement-id>-CURRENT`，同一需求只维护一个身份。
+2. `render_requirement_report.py <manifest> --output <report>` 确定性渲染，校验失败不得交付。
+
+结论一致性：报告总体结论（PASS/BLOCKED/FAIL/INCONCLUSIVE）与清单里的 `release_recommendation` 必须由同一组 AC 事实推导。`BLOCKED` 由“存在被门禁阻塞且未执行的 AC”触发；只要有一条 `none` 或未执行 AC，结论就不会是 PASS，发布建议也不得写“可进入下一阶段”。
 
 ## 8. 失败分类
 

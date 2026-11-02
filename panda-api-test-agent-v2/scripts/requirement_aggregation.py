@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -16,6 +17,7 @@ from typing import Any, Iterable
 RUN_STATUSES = {"passed", "failed", "blocked", "inconclusive", "not_run"}
 EXECUTED_STATUSES = {"passed", "failed", "error", "blocked"}
 DEFECT_STATUSES = {"open", "fixed", "reopened", "invalid"}
+_L2_SCRIPTS = Path(__file__).resolve().parents[2] / "panda-ai-api-tester-v2" / "scripts"
 
 
 def _canonical(value: Any) -> str:
@@ -52,7 +54,10 @@ def normalize_run_result(result: dict[str, Any], run_ref: str | None = None, *, 
     lineage = {**metadata_lineage, **raw_lineage}
     authoritative = lineage.get("authoritative")
     if not isinstance(authoritative, bool):
-        authoritative = verdict != "blocked"
+        # A blocked run still executed (gates ran, requests may have been attempted).
+        # Dropping it turns "ran and was stopped" into "never ran", so every run is
+        # authoritative unless the caller marks it otherwise.
+        authoritative = True
     tasks = []
     for raw in result.get("task_results") or []:
         if not isinstance(raw, dict) or not raw.get("task_id"):
@@ -78,9 +83,33 @@ def normalize_run_result(result: dict[str, Any], run_ref: str | None = None, *, 
         "retry_of_run_id": lineage.get("retry_of_run_id"),
         "supersedes_run_id": lineage.get("supersedes_run_id"),
         "task_results": tasks,
+        "cleanup": copy.deepcopy(result.get("cleanup") or {}),
+        "evidence_closure": copy.deepcopy(result.get("evidence_closure") or {}),
+        "known_gaps": copy.deepcopy(result.get("known_gaps") or []),
         "external_evidence": copy.deepcopy(result.get("external_evidence") or {}),
         "defects": copy.deepcopy(result.get("defects") or []),
     }
+
+
+def _recompute_result(root: Path) -> tuple[dict[str, Any] | None, str]:
+    """Re-derive a run result from its immutable ledger when possible.
+
+    ``result.json`` is a derived artifact; if the reducer or its rules changed, a
+    stale summary must not be promoted into a requirement report. The ledger
+    (plan + events + resources) is the authority.
+    """
+    l2_scripts = _L2_SCRIPTS
+    if not (l2_scripts / "result_reducer.py").is_file():
+        return None, "recorded"
+    if not (root / "plan.json").is_file() or not (root / "events.jsonl").is_file():
+        return None, "recorded"
+    if str(l2_scripts) not in sys.path:
+        sys.path.insert(0, str(l2_scripts))
+    try:
+        import result_reducer  # noqa: PLC0415 - optional dependency by design
+        return result_reducer.reduce_run(root), "recomputed"
+    except Exception:
+        return None, "recorded"
 
 
 def load_run_record(run_dir: str | Path, *, sequence: int = 1) -> dict[str, Any]:
@@ -88,7 +117,11 @@ def load_run_record(run_dir: str | Path, *, sequence: int = 1) -> dict[str, Any]
     result = _read_json(root / "result.json")
     metadata = _read_json(root / "run.json") if (root / "run.json").is_file() else {}
     plan = _read_json(root / "plan.json") if (root / "plan.json").is_file() else {}
+    recomputed, result_source = _recompute_result(root)
+    if recomputed is not None:
+        result = recomputed
     record = normalize_run_result(result, str(root / "result.json"), run_metadata=metadata, sequence=sequence)
+    record["result_source"] = result_source
     record["requirement_id"] = record.get("requirement_id") or plan.get("requirement_id")
     record["lineage"].setdefault("requirement_id", record["requirement_id"])
     return record
@@ -128,20 +161,22 @@ def _defects_from_run(record: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def reconcile_defects(previous_defects: list[dict[str, Any]], current_runs: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge defect identities across runs; not_run never closes a defect."""
+    """Merge defect identities across runs; only a strictly later pass can close one."""
     by_signature = {}
     for raw in previous_defects or []:
         if isinstance(raw, dict) and raw.get("signature"):
             by_signature[raw["signature"]] = copy.deepcopy(raw)
-    seen_now: set[str] = set()
-    passed_cases: set[str] = set()
-    for record in current_runs:
-        if not record.get("authoritative"):
-            continue
+    records = [record for record in current_runs if record.get("authoritative")]
+    records.sort(key=lambda item: (item.get("sequence", 0), item.get("run_id", "")))
+    seq_index = {record.get("run_id"): index for index, record in enumerate(records)}
+    signatures_by_run: dict[str, set[str]] = {}
+    passed_at: dict[str, list[tuple[int, str]]] = {}
+    for index, record in enumerate(records):
         run_id = record["run_id"]
+        run_signatures = signatures_by_run.setdefault(run_id, set())
         for defect in _defects_from_run(record):
             signature = defect["signature"]
-            seen_now.add(signature)
+            run_signatures.add(signature)
             item = by_signature.get(signature) or {
                 "defect_id": "DEF-" + signature.split(":", 1)[-1][:16],
                 "signature": signature,
@@ -165,11 +200,24 @@ def reconcile_defects(previous_defects: list[dict[str, Any]], current_runs: Iter
             by_signature[signature] = item
         for task in record.get("task_results") or []:
             if task.get("status") == "passed":
-                passed_cases.add(task["task_id"])
+                passed_at.setdefault(task["task_id"], []).append((index, run_id))
     for item in by_signature.values():
-        if item.get("status") == "open" and item.get("case_id") in passed_cases and item.get("last_seen_run_id") not in seen_now:
+        if item.get("status") not in {"open", "reopened"}:
+            continue
+        case_id = item.get("case_id")
+        if not case_id or case_id not in passed_at:
+            continue
+        last_seen_index = seq_index.get(item.get("last_seen_run_id"))
+        for pass_index, pass_run_id in passed_at[case_id]:
+            if last_seen_index is not None and pass_index <= last_seen_index:
+                # The defect must be followed by a strictly later run; a pass in the
+                # same or an earlier run proves nothing about the failure.
+                continue
+            if item.get("signature") in signatures_by_run.get(pass_run_id, set()):
+                continue
             item["status"] = "fixed"
-            item["fixed_by_run_id"] = item.get("last_seen_run_id")
+            item["fixed_by_run_id"] = pass_run_id
+            break
     return sorted(by_signature.values(), key=lambda item: item.get("defect_id", ""))
 
 
@@ -190,7 +238,9 @@ def _merge_external_evidence(records: list[dict[str, Any]], supplied: dict[str, 
         supports.update(evidence.get("supports") or [])
         missing.update(evidence.get("missing") or [])
     if "status" not in chosen:
-        chosen["status"] = "complete" if records and all(record.get("verdict") == "passed" for record in records if record.get("authoritative")) else "partial" if refs else "none"
+        # An API verdict is not external evidence. Without explicit DB/log/trace
+        # proof the merged status can never be "complete".
+        chosen["status"] = "partial" if refs else "none"
     chosen["refs"] = sorted(refs)
     chosen["supports"] = sorted(supports)
     chosen["missing"] = sorted(missing)
@@ -217,7 +267,7 @@ def aggregate_requirement_current(requirement_id: str, run_records: list[dict[st
             }
     statuses = {item.get("status") for item in current_cases.values()}
     if not current_cases:
-        current_status = "not_run"
+        current_status = "blocked" if any(record.get("verdict") == "blocked" for record in records) else "not_run"
     elif statuses & {"failed", "error"}:
         current_status = "failed"
     elif statuses - {"passed"}:
@@ -225,15 +275,48 @@ def aggregate_requirement_current(requirement_id: str, run_records: list[dict[st
     else:
         current_status = "passed"
     current_run = authoritative[-1] if authoritative else None
+    cleanup = copy.deepcopy((current_run or {}).get("cleanup") or {})
+    closure = copy.deepcopy((current_run or {}).get("evidence_closure") or {})
+    residual_risks: list[dict[str, Any]] = []
+    for item in cleanup.get("pending_objects") or []:
+        if isinstance(item, dict):
+            residual_risks.append({"kind": "pending_object", "object_id": item.get("object_id"), "case_id": item.get("case_id"), "cleanup_status": item.get("cleanup_status"), "source_run_id": (current_run or {}).get("run_id")})
+    for task_id in cleanup.get("unresolved_obligations") or []:
+        residual_risks.append({"kind": "unresolved_cleanup_obligation", "case_id": task_id, "source_run_id": (current_run or {}).get("run_id")})
+    for task_id in cleanup.get("incomplete_tasks") or []:
+        if task_id:
+            residual_risks.append({"kind": "cleanup_task_incomplete", "case_id": task_id, "source_run_id": (current_run or {}).get("run_id")})
+    blocking_gaps = [
+        gap
+        for gap in (current_run or {}).get("known_gaps") or []
+        if isinstance(gap, dict) and gap.get("blocking") is True
+    ]
+    status_reasons: list[str] = []
+    if current_run:
+        cleanup_status = cleanup.get("status")
+        if cleanup.get("required") and cleanup_status and cleanup_status != "complete":
+            status_reasons.append(f"cleanup_{cleanup_status}")
+        if closure.get("oracle_required") and not closure.get("oracle_verified"):
+            status_reasons.append("oracle_unverified")
+        if blocking_gaps:
+            status_reasons.append("blocking_gap")
+        if current_run.get("verdict") != "passed" and current_status == "passed":
+            status_reasons.append(f"run_verdict_{current_run.get('verdict')}")
+    if current_status == "passed" and status_reasons:
+        # A case-level pass cannot be stronger than the run that produced it.
+        current_status = "blocked" if {"cleanup_blocked", "blocking_gap"} & set(status_reasons) else "inconclusive"
     defects = reconcile_defects((previous_manifest or {}).get("defects") or [], records)
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "requirement_id": requirement_id,
         "current": {
             "run_id": current_run.get("run_id") if current_run else None,
             "status": current_status,
+            "status_reasons": status_reasons,
             "selection_reason": "latest_authoritative_run_with_case_level_merge",
             "scope_hash": current_run.get("scope_hash") if current_run else None,
+            "cleanup": cleanup,
+            "evidence_closure": closure,
         },
         "runs": [
             {
@@ -244,11 +327,13 @@ def aggregate_requirement_current(requirement_id: str, run_records: list[dict[st
                 "result_ref": record["run_ref"],
                 "retry_of_run_id": record.get("retry_of_run_id"),
                 "supersedes_run_id": record.get("supersedes_run_id"),
+                "cleanup_status": (record.get("cleanup") or {}).get("status"),
             }
             for record in records
         ],
         "current_cases": current_cases,
         "defects": defects,
+        "residual_risks": residual_risks,
         "external_evidence": _merge_external_evidence(records, external_evidence),
     }
 

@@ -108,7 +108,7 @@ def build_requirement_validation_intent(context: dict[str, Any], environment_id:
     gaps = copy.deepcopy(context.get("known_gaps") or [])
     for criterion in criteria:
         if criterion.get("verifiability_decision_status") != "ai_decided":
-            gaps.append({"gap_id": f"GAP-{criterion['ac_id']}-AI-DECISION", "blocking": True, "stage": "design", "description": "等待 AI 结合需求、源码、契约和 Oracle 判断接口可验证性", "impact": "不得生成或执行该验收项的 API 用例", "next_action": "由 AI/人工补充 direct、partial 或 none 决策及证据"})
+            gaps.append({"gap_id": f"GAP-{criterion['ac_id']}-AI-DECISION", "blocking": True, "stage": "design", "acceptance_refs": [criterion["ac_id"]], "description": "等待 AI 结合需求、源码、契约和 Oracle 判断接口可验证性", "impact": "不得生成或执行该验收项的 API 用例", "next_action": "由 AI/人工补充 direct、partial 或 none 决策及证据"})
         elif criterion["interface_verifiability"] == "none":
             gaps.append({"gap_id": f"GAP-{criterion['ac_id']}-NON-API", "blocking": False, "stage": "report", "description": "接口层不可验证该验收项", "impact": "不得由 API 运行形成通过结论", "next_action": ", ".join(criterion["recommended_validation_layers"])})
     intent = {

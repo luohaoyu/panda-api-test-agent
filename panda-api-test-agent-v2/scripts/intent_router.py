@@ -109,10 +109,19 @@ def route_intent(text: str, request_metadata: dict[str, Any] | None = None) -> d
         if isinstance(request_metadata, dict) and key in request_metadata
         and isinstance(request_metadata[key], (str, int, float, bool, type(None)))
     }
+    ranked = sorted(
+        ({"intent_type": name, "score": score} for name, score in scores.items()),
+        key=lambda item: (-item["score"], item["intent_type"]),
+    )
+    matched = [item for item in ranked if item["score"] > 0]
     return {
         "intent": intent,
         "intent_type": intent,
         "candidate_intent": intent,
+        # Structured candidates keep an unmatched request actionable for the AI
+        # instead of degrading to an empty answer.
+        "candidates": matched or ranked,
+        "candidate_source": "keyword_match" if matched else "unmatched_default_order",
         "supported": intent in INTENTS,
         "confidence": confidence,
         "source": "metadata" if explicit else "text",
@@ -120,6 +129,7 @@ def route_intent(text: str, request_metadata: dict[str, Any] | None = None) -> d
         "fallback_only": not bool(explicit),
         "metadata": safe_metadata,
         "requires_design_review": True,
+        "requires_ai_clarification": intent is None,
         "execution_allowed": False,
         "request_sent": False,
         "side_effects": False,

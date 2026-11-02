@@ -41,3 +41,26 @@
 ## 重点防回归问题
 
 `DEF-REDUCER-CLEANUP-SYNC`：Slice Executor 已发现清理残留，而 Result Reducer 丢失该状态并输出 `passed`。自评测必须覆盖这一状态，确保业务成功和完整验收通过被严格区分。
+
+状态：**已修复（2.3.0）**。对应自动化回归测试：
+
+```text
+panda-ai-api-tester-v2/tests/test_p0_fail_closed.py
+  ReviewGateFailClosedTests    审核门缺失字段必须阻断
+  CleanupSemanticsTests        业务通过 ≠ 清理完成
+  RunnerResidualTests          runner 残留必须进入资源账本且不带业务载荷
+
+panda-api-test-agent-v2/tests/test_aggregation_integrity.py
+  ResidualAwareAggregationTests  需求聚合必须继承 cleanup / evidence_closure 并降级
+  DefectLifecycleTests           缺陷只能由更晚的通过运行关闭
+  RunRecordSourceTests           result.json 过期不得覆盖账本重算
+```
+
+## 与实现的对应关系
+
+| 契约字段 | 实现位置 | 回归测试 |
+|---|---|---|
+| `expected_contract.cleanup.reducer_status_expected=pending` | `panda-ai-api-tester-v2/scripts/result_reducer.py` | `CleanupSemanticsTests.test_writer_pass_is_not_proof_of_cleanup` |
+| `expected_contract.requirement_aggregation.current_status_expected=inconclusive` | `panda-api-test-agent-v2/scripts/requirement_aggregation.py` | `ResidualAwareAggregationTests.test_passed_cases_with_pending_cleanup_cannot_be_passed` |
+| `expected_contract.review_gate.missing_review_state_must_block` | `panda-ai-api-tester-v2/scripts/slice_executor.py::review_clearance` | `ReviewGateFailClosedTests.test_legacy_state_without_review_fields_cannot_execute` |
+| `residual_risk_must_be_visible` | `slice_executor._record_runner_residuals` + `requirement_aggregation.aggregate_requirement_current` | `RunnerResidualTests`、`test_pending_object_is_surfaced_as_residual_risk` |

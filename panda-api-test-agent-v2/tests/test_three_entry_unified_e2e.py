@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
-L2_DIR = Path("C:/Users/Administrator/.workbuddy/skills/panda-ai-api-tester-v2")
+L2_DIR = Path(__file__).resolve().parents[2] / "panda-ai-api-tester-v2"
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 sys.path.insert(0, str(L2_DIR / "scripts"))
 

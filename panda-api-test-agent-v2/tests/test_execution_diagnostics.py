@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
-L2_SCRIPTS = Path(r"C:/Users/Administrator/.workbuddy/skills/panda-ai-api-tester-v2/scripts")
+L2_SCRIPTS = Path(__file__).resolve().parents[2] / "panda-ai-api-tester-v2" / "scripts"
 sys.path.insert(0, str(L2_SCRIPTS))
 sys.path.insert(0, str(SCRIPTS))
 
@@ -73,6 +73,37 @@ class ExecutionDiagnosticsTests(unittest.TestCase):
         self.assertEqual(diagnosis["status"], "recoverable")
         self.assertIn("FEASIBILITY_PLAN_MISSING", {item["code"] for item in diagnosis["issues"]})
         self.assertTrue(any(item["recoverable"] for item in diagnosis["issues"]))
+
+    def test_global_blocking_gap_still_blocks_everything(self):
+        design = self._design()
+        assets = {field: {} for field in ("project", "test_config", "contract", "environment", "risk")}
+        design["known_gaps"] = [{"gap_id": "GAP-NO-TASKS", "blocking": True, "stage": "design"}]
+        diagnosis = diagnose_design(design, execution_assets=assets)
+        self.assertIn("DESIGN_BLOCKING_GAPS_PRESENT", {item["code"] for item in diagnosis["issues"]})
+        self.assertFalse(diagnosis["execution_allowed"])
+        self.assertEqual(diagnosis["deferred_gaps"], [])
+
+    def test_gap_scoped_outside_the_approved_scope_does_not_block(self):
+        design = self._design()
+        assets = {field: {} for field in ("project", "test_config", "contract", "environment", "risk")}
+        design["cases"][0]["acceptance_refs"] = ["AC-1"]
+        design["known_gaps"] = [
+            {"gap_id": "GAP-AC2-AI-DECISION", "blocking": True, "stage": "design", "acceptance_refs": ["AC-2"]},
+        ]
+        diagnosis = diagnose_design(design, execution_assets=assets)
+        codes = {item["code"] for item in diagnosis["issues"]}
+        self.assertNotIn("DESIGN_BLOCKING_GAPS_PRESENT", codes)
+        self.assertEqual(diagnosis["deferred_gaps"], ["GAP-AC2-AI-DECISION"])
+
+    def test_gap_scoped_into_the_approved_scope_blocks(self):
+        design = self._design()
+        assets = {field: {} for field in ("project", "test_config", "contract", "environment", "risk")}
+        design["cases"][0]["acceptance_refs"] = ["AC-1"]
+        design["known_gaps"] = [
+            {"gap_id": "GAP-AC1-ORACLE", "blocking": True, "stage": "execute", "acceptance_refs": ["AC-1"]},
+        ]
+        diagnosis = diagnose_design(design, execution_assets=assets)
+        self.assertIn("DESIGN_BLOCKING_GAPS_PRESENT", {item["code"] for item in diagnosis["issues"]})
 
     def test_diagnosis_does_not_mutate_design(self):
         design = self._design()

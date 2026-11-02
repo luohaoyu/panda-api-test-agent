@@ -2,7 +2,7 @@
 name: panda-ai-api-tester-v2
 description: 读取工程 L1 适配层，以结构化 TestPackage 为核心执行接口门禁、即时验证和稳定回归晋级，输出确定性的 TestResult 与 HTML 报告。用户要求验证接口、测试业务链路、诊断接口环境或将稳定用例纳入 pytest/CI 时使用。；v2 架构升级版
 agent_created: true
-version: 2.4.0
+version: 2.5.0
 ---
 
 # AI API Tester
@@ -60,6 +60,9 @@ version: 2.4.0
 - 完成 HTTP、业务 code、关键字段及当前用例启用的 DB/Redis/审计断言。
 - 任一步失败后，依赖步骤标记 `not_run`，不得以空值继续。
 - 无可靠清理能力时，普通单次非生产写用例可以执行，但必须记录 `pending_objects`、残留风险和清理状态，结果不得宣称完整通过；批量回归、PROMOTE、destructive、生产/疑似生产和真实外部动作仍阻断或要求确认。`cleanup_waiver` 仅用于明确受控的单次残留，不替代风险分级。
+- 审核门 fail-closed：运行状态缺失、留空或出现无法识别的 `review_status` 时必须阻断执行（`slice_blocked_unreviewed`），不得因字段缺失而放行；`approved`/`partially_approved` 之外的任何状态都不可执行。
+- 清理义务与业务通过分离：写入任务的 `passed` 只是业务事实，不是清理证据。`cleanup_obligations` 同时记录 cleanup 任务（`task_ids`）和留下对象的写入任务（`residual_task_ids`）；只有资源事实为 `cleaned`/`verified_absent` 或存在已通过的 cleanup 任务覆盖该对象时，Reducer 才可给出 `cleanup.status=complete` 与 `passed`。
+- Runner 声明的 `cleanup.pending_objects` 必须由 Slice Executor 写入 `resources.json` 并登记 `pending_cleanup`，不得只留在子运行结果里。
 
 ### PROMOTE（独立晋级动作）
 

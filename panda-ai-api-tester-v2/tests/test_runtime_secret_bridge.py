@@ -12,6 +12,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from runtime_secret_bridge import (
     LocalSecretBridgeError,
     consume_local_runtime_envelope,
+    purge_stale_envelopes,
     secret_envelope_path,
     write_local_runtime_envelope,
 )
@@ -163,6 +164,55 @@ class RuntimeSecretBridgeTests(unittest.TestCase):
             outside = root / "package.json"
             with self.assertRaisesRegex(LocalSecretBridgeError, "under .panda-api-test-agent"):
                 secret_envelope_path(outside, "RUN-001")
+
+    def test_stale_claim_artifacts_are_purged_without_touching_live_envelope(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package = self._package()
+            package_path = self._package_path(root)
+            live = write_local_runtime_envelope(package_path, package, "RUN-LIVE", {"TEST3_TOKEN": "live-secret"})
+            secret_dir = live.parent
+            orphan = secret_dir / ".RUN-DEAD.0123456789abcdef0123456789abcdef.consuming.json"
+            orphan.write_text('{"values": {"TEST3_TOKEN": "orphan"}}', encoding="utf-8")
+            old = (datetime.now(timezone.utc) - timedelta(hours=2)).timestamp()
+            os.utime(orphan, (old, old))
+            result = purge_stale_envelopes(package_path)
+            self.assertIn(str(orphan), result["removed"])
+            self.assertTrue(live.is_file())
+            self.assertTrue((secret_dir / orphan.name).exists() is False)
+
+    def test_fresh_claim_artifact_is_kept(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package_path = self._package_path(root)
+            live = write_local_runtime_envelope(package_path, self._package(), "RUN-FRESH", {"TEST3_TOKEN": "t"})
+            orphan = live.parent / ".RUN-FRESH.0123456789abcdef0123456789abcdef.writing.json"
+            orphan.write_text("{}", encoding="utf-8")
+            result = purge_stale_envelopes(package_path)
+            self.assertNotIn(str(orphan), result["removed"])
+            self.assertTrue(orphan.is_file())
+
+    def test_expired_envelope_is_rejected_then_purged(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package = self._package()
+            package_path = self._package_path(root)
+            target = write_local_runtime_envelope(package_path, package, "RUN-EXPIRED", {"TEST3_TOKEN": "old-secret"}, created_at=datetime.now(timezone.utc) - timedelta(hours=1))
+            with self.assertRaisesRegex(LocalSecretBridgeError, "expired"):
+                consume_local_runtime_envelope(package_path, package, "RUN-EXPIRED")
+            self.assertFalse(target.exists())
+
+    def test_housekeeping_purges_expired_envelopes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package = self._package()
+            package_path = self._package_path(root)
+            target = write_local_runtime_envelope(package_path, package, "RUN-OLD", {"TEST3_TOKEN": "old-secret"}, created_at=datetime.now(timezone.utc) - timedelta(hours=1))
+            result = purge_stale_envelopes(package_path)
+            self.assertIn(str(target), result["removed"])
+            self.assertFalse(target.exists())
 
 
 if __name__ == "__main__":

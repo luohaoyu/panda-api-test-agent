@@ -93,31 +93,80 @@ def reduce_run(run_dir: str | Path) -> dict[str, Any]:
         and bool(item.get("evidence_refs"))
         for item in business
     )
-    pending = [item for item in resources.get("objects") or [] if isinstance(item, dict) and item.get("cleanup_status") == "pending"]
-    cleanup = [item for item in task_results if item.get("type") == "cleanup"]
-    required_cleanup = [item for item in tasks if isinstance(item, dict) and (item.get("type") == "cleanup" or item.get("cleanup_required"))]
-    cleanup_failed = any(item.get("status") in {"failed", "error", "blocked"} for item in cleanup)
-    cleanup_incomplete = bool(required_cleanup) and not all(_event_status(events, item.get("task_id")) == "passed" for item in required_cleanup)
+    resources_objects = [item for item in resources.get("objects") or [] if isinstance(item, dict)]
+    pending = [item for item in resources_objects if item.get("cleanup_status") == "pending"]
+    cleanup_tasks = [item for item in tasks if isinstance(item, dict) and item.get("type") == "cleanup"]
+    cleanup_results = [item for item in task_results if item.get("type") == "cleanup"]
+    cleanup_failed = any(item.get("status") in {"failed", "error", "blocked"} for item in cleanup_results)
+    cleanup_task_incomplete = [
+        item.get("task_id")
+        for item in cleanup_tasks
+        if _event_status(events, item.get("task_id")) != "passed"
+    ]
+    obligations = plan.get("cleanup_obligations") if isinstance(plan.get("cleanup_obligations"), dict) else {}
+    residual_task_ids = [str(item) for item in obligations.get("residual_task_ids") or [] if item]
+    if not residual_task_ids:
+        # Plans compiled before residual_task_ids existed only expose cleanup_required
+        # on the writer itself; fall back to those flags rather than trusting nothing.
+        residual_task_ids = [
+            str(item.get("task_id"))
+            for item in tasks
+            if isinstance(item, dict)
+            and item.get("cleanup_required")
+            and item.get("type") not in {"cleanup", "reduce"}
+            and item.get("task_id")
+        ]
+    settled_statuses = {"cleaned", "verified_absent", "released", "not_created"}
+    resource_owner = {
+        str(event.get("resource_id")): str(event.get("task_id"))
+        for event in events
+        if event.get("resource_id") and event.get("task_id")
+    }
+    task_by_id = {item.get("task_id"): item for item in tasks if isinstance(item, dict)}
+
+    def _residual_settled(task_id: str) -> bool:
+        """A write obligation is settled only by resource facts or a passed cleanup task."""
+        owned = [item for item in resources_objects if resource_owner.get(str(item.get("object_id"))) == task_id]
+        if owned and all(str(item.get("cleanup_status")) in settled_statuses for item in owned):
+            return True
+        for cleanup_task in cleanup_tasks:
+            if _event_status(events, cleanup_task.get("task_id")) != "passed":
+                continue
+            if task_id in {str(dep) for dep in cleanup_task.get("depends_on") or []}:
+                return True
+            locks = {str(lock) for lock in cleanup_task.get("resource_locks") or []}
+            if locks and locks.intersection({str(lock) for lock in (task_by_id.get(task_id) or {}).get("resource_locks") or []}):
+                return True
+        return False
+
+    unresolved_residuals = [task_id for task_id in residual_task_ids if not _residual_settled(task_id)]
+    cleanup_unresolved = bool(unresolved_residuals or cleanup_task_incomplete)
+    cleanup_required = bool(cleanup_tasks or residual_task_ids)
     oracle = [item for item in task_results if item.get("type") == "oracle"]
     required_oracle = [item for item in tasks if isinstance(item, dict) and item.get("type") == "oracle" and item.get("required", True) is not False]
     oracle_incomplete = bool(required_oracle) and not all(_event_status(events, item.get("task_id")) == "passed" for item in required_oracle)
     failed = any(item.get("status") in {"failed", "error"} for item in task_results)
     if hard_gaps:
         verdict = "blocked"
-    elif pending or cleanup_failed or cleanup_incomplete:
+    elif pending or cleanup_failed or cleanup_task_incomplete:
+        # A planned cleanup task that never ran, a failed cleanup, or a resource the
+        # ledger still marks pending all mean the run did not finish its obligations.
         verdict = "blocked"
     elif not business_executed:
         verdict = "not_run"
     elif failed:
         verdict = "failed"
+    elif cleanup_unresolved:
+        # Nothing failed, but a write task left an object with no cleanup mechanism:
+        # the result cannot be closed as PASS either.
+        verdict = "inconclusive"
     elif len(business_executed) == len(business) and business and all(item.get("status") == "passed" for item in business_executed) and not oracle_incomplete and business_evidence_closed:
         verdict = "passed"
     else:
         verdict = "inconclusive"
     oracle_verified = bool(oracle) and all(item.get("status") == "passed" for item in oracle)
-    cleanup_complete = (bool(cleanup) and all(item.get("status") == "passed" for item in cleanup)) or not cleanup
-    if cleanup_incomplete:
-        cleanup_complete = False
+    cleanup_status = "blocked" if pending or cleanup_failed or cleanup_task_incomplete else "pending" if cleanup_unresolved else "complete"
+    cleanup_complete = cleanup_status == "complete" and not cleanup_task_incomplete
     return {
         "schema_version": "2.0",
         "run_id": run_head.get("run_id"),
@@ -125,8 +174,15 @@ def reduce_run(run_dir: str | Path) -> dict[str, Any]:
         "verdict": verdict,
         "known_gaps": hard_gaps,
         "task_results": task_results,
-        "evidence_closure": {"business_execution": bool(business_executed), "business_evidence_closed": business_evidence_closed, "oracle_verified": oracle_verified, "evidence_refs": sorted(evidence_refs), "business_evidence_refs": sorted(business_evidence_refs), "closed": verdict == "passed"},
-        "cleanup": {"pending_objects": pending, "status": "blocked" if pending or cleanup_failed else "complete", "tasks_complete": cleanup_complete},
+        "evidence_closure": {"business_execution": bool(business_executed), "business_evidence_closed": business_evidence_closed, "oracle_required": bool(required_oracle), "oracle_verified": oracle_verified, "evidence_refs": sorted(evidence_refs), "business_evidence_refs": sorted(business_evidence_refs), "closed": verdict == "passed"},
+        "cleanup": {
+            "required": cleanup_required,
+            "pending_objects": pending,
+            "unresolved_obligations": unresolved_residuals,
+            "incomplete_tasks": cleanup_task_incomplete,
+            "status": cleanup_status,
+            "tasks_complete": cleanup_complete,
+        },
     }
 
 
