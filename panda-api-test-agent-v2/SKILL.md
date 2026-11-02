@@ -2,7 +2,7 @@
 name: panda-api-test-agent-v2
 description: Easy/Fast 的新需求与新功能接口验证主 Agent。面向“验证这个需求/新功能”“测试单个接口质量”“调试这个接口”“检查环境”四类入口，先识别入口与最小目标；需求验收项分类为 direct/partial/none，并明确 none 无法在接口层验证；单接口默认执行传统接口质量测试。AI 生成测试设计后必须进入 pending_review，只有人工 approved 或 partially_approved 的具体用例才允许执行。需要进行需求/功能接口验收、单接口质量测试或接口调试时使用。
 agent_created: true
-version: 2.4.0
+version: 2.5.0
 ---
 
 # API Test Agent
@@ -22,7 +22,7 @@ version: 2.4.0
 
 **安装前提**：本 skill 依赖 `panda-ai-api-tester-v2`（L2 执行与编译器）与 `panda-report-theme`（报告样式单一来源），三者必须平级安装在同一个 skills 目录下；脚本按技能目录的相对位置解析依赖，任一同级目录缺失时编排入口与报告渲染会 fail-closed 报错，不做路径猜测。
 
-跨项目原则：主 Agent 只依赖当前工程的 L1 适配层，不绑定业务域。项目配置和接口画像采用“按需获取、局部可用、局部阻断”原则：优先建立当前测试目标所需的最小可执行配置，不因无关资源缺失阻断整个需求。`.panda-api-test-agent/test-config.md` 仍是项目级多环境 Schema 2.1 的长期资产；项目适配根目录为 `.panda-api-test-agent/adapter/`，由 `panda-l1-adapter-generator-v2` 按需初始化和维护，当前只创建根目录，不预创建适配器子目录。临时运行可使用经证据核验的运行时输入，并由 L1 按需补齐或增量维护配置。所有项目级 API 测试产物统一位于 `.panda-api-test-agent/`；需求事实必须进入 `.panda-api-test-agent/requirements/<requirement-id>/context.json`，运行事实进入 `.panda-api-test-agent/runs/<run-id>/` 不可变运行目录。主 Agent 只消费配置和调度维护者，不直接修改项目配置。
+跨项目原则：主 Agent 只依赖当前工程的 L1 适配层，不绑定业务域。项目配置和接口画像采用“按需获取、局部可用、局部阻断”原则：优先建立当前测试目标所需的最小可执行配置，不因无关资源缺失阻断整个需求。`.panda-api-test-agent/test-config.md` 仍是项目级多环境 Schema 2.1 的长期资产；项目适配根目录为 `.panda-api-test-agent/adapter/`，由 `panda-l1-adapter-generator-v2` 按需初始化和维护，当前只创建根目录，不预创建适配器子目录。临时运行可使用经证据核验的运行时输入，并由 L1 按需补齐或增量维护配置。所有项目级 API 测试产物统一位于 `.panda-api-test-agent/`；需求事实必须进入 `.panda-api-test-agent/requirements/<requirement-id>/context.json`，运行事实进入 `.panda-api-test-agent/runs/<run-id>/` 不可变运行目录。主 Agent 只消费配置和调度维护者，不直接修改项目配置。数据源登记资产为 `.panda-api-test-agent/data-sources.md`：记录经责任人确认的造数通道（含 MCP 类工具如 datafactory）、支持环境、能力范围、数据标签规范与清理方式；设计期判断测试数据"可构造"时以该登记为证据，判缺必须附 evidence。
 
 ## 四类入口与默认行为
 
@@ -49,11 +49,12 @@ version: 2.4.0
 - 入口路由脚本只提供显式 metadata 路由或关键词候选；自然语言语义由 AI/Skill 决定，脚本歧义时不得代替 AI 猜测。
 
 1. 先自行读取、搜索、校验和交叉比对源码、Git 引用、部署配置、环境变量、已有文档和测试资产，再向用户追问。
-2. 用户提供的分支、Tag、Commit 或版本号异常时，先解析本地/远程引用、相近命名和提交对象；优先使用隔离 worktree 或只读 Git 对象检查，不覆盖当前工作区。
-3. 配置或画像缺失时，按当前测试目标生成最小配置和画像；缺口只阻断依赖该缺口的阶段或验收项，不得把局部缺口扩大为全局不可测。
-4. 普通非生产测试请求默认允许产生持久化副作用，包括业务记录、日志、轨迹、异步消息和测试数据；执行前记录环境、对象、范围、side_effect 和残留风险。
-5. 只有生产/疑似生产、删除或破坏性操作、批量大规模执行、真实外部动作、跨授权范围或无法判断目标对象时才强制确认或阻断。
-6. 不能安全自助解决时，只询问当前动作真正需要的最小信息，并说明该信息阻塞哪些测试项。
+2. **数据源前置检查（判缺前强制）**：判测试数据缺口前，先查 `.panda-api-test-agent/data-sources.md` 登记与当前会话可用的造数类 MCP/连接器（如 datafactory），核对其支持环境与当前目标环境是否匹配、授权是否具备；匹配时**不得判为缺口**，改为把造数建模为声明 `object_ref`/`teardown`/数据标签的 fixture 写入任务纳入设计，与其他写用例同样过审核门。判缺必须登记 evidence（查过哪些来源、为什么不可构造）；未登记 evidence 的缺口视为诊断不完整，禁止凭"没查过"判缺。
+3. 用户提供的分支、Tag、Commit 或版本号异常时，先解析本地/远程引用、相近命名和提交对象；优先使用隔离 worktree 或只读 Git 对象检查，不覆盖当前工作区。
+4. 配置或画像缺失时，按当前测试目标生成最小配置和画像；缺口只阻断依赖该缺口的阶段或验收项，不得把局部缺口扩大为全局不可测。
+5. 普通非生产测试请求默认允许产生持久化副作用，包括业务记录、日志、轨迹、异步消息和测试数据；执行前记录环境、对象、范围、side_effect 和残留风险。
+6. 只有生产/疑似生产、删除或破坏性操作、批量大规模执行、真实外部动作、跨授权范围或无法判断目标对象时才强制确认或阻断。
+7. 不能安全自助解决时，只询问当前动作真正需要的最小信息，并说明该信息阻塞哪些测试项。
 
 ## 何时使用
 
@@ -188,7 +189,7 @@ version: 2.4.0
 
 - 禁止自行生成、补写或猜测 L1 配置及项目适配层内容，必须委托 `panda-l1-adapter-generator-v2`；项目适配根目录统一为 `.panda-api-test-agent/adapter/`，子目录按真实需求增量规划。
 - 禁止绕过「测试设计人工审核门」；意图确认、高风险确认、历史审批和“直接执行”口令都不构成设计审核。
-- 局部阻断：缺口先按 `acceptance_refs`/`case_refs` 映射到 AC 或用例，只阻断与本次获准范围相交的部分；未声明范围的 blocking 缺口才按全局阻断处理（fail-closed）。被挡在范围外的缺口写入 `deferred_gaps` 备查，不得借它把整个需求判为不可测。
+- 局部阻断：缺口先按 `acceptance_refs`/`case_refs` 映射到 AC 或用例，只阻断与本次获准范围相交的部分；未声明范围的 blocking 缺口才按全局阻断处理（fail-closed）。被挡在范围外的缺口写入 `deferred_gaps` 备查，不得借它把整个需求判为不可测。数据类缺口必须先完成数据源前置检查（`data-sources.md` 登记与会话内造数类 MCP/连接器）并登记 evidence 后才可判缺；存在可用造数通道时，造数作为 fixture 写入任务进设计，不得判缺。
 - 审核门 fail-closed：`state.json` 缺失、留空或 `review_status` 无法识别时，一律按“未审核”处理并阻断，不得因字段缺失而放行。状态推进只能经首次 `compile_and_create_run` 或后续 `record_review`；阻断时写入 `slice_blocked_unreviewed` 事件和 `review_not_executable` 下一步。
 - 清理义务与业务通过必须分离：写入任务返回 passed 不等于其对象已清理。写入任务声明 `object_ref`/`teardown` 时，只有资源事实为 `cleaned`/`verified_absent`，或存在依赖它的 cleanup 任务且该任务 passed，才算清理完成；否则统一 Run 不得归约为 passed。
 - 残留必须沿链路可见：Slice Executor 把 runner 声明的残留对象写入 `resources.json` 并登记 `pending_cleanup`；Result Reducer 输出 `cleanup.status`、`unresolved_obligations`、`incomplete_tasks`；需求聚合并入 `residual_risks` 并把 `current.status` 降级为 `inconclusive` 或 `blocked`。

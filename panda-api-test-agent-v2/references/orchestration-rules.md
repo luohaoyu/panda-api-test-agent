@@ -11,6 +11,7 @@
 | 项目级 | `.panda-api-test-agent/test-config.md`、`.panda-api-test-agent/adapter/` | 多环境 HTTP、认证、DB、Redis、MQ、可观测性、安全策略和项目适配规则 |
 | 接口级 | `.panda-api-test-agent/interface-profile/*.md` | 路径、Schema、错误码、前置数据、副作用和契约指纹 |
 | 需求级 | `.panda-api-test-agent/requirements/<id>/context.json` | PRD、代码基线、目标接口、AC、专项数据/风险/授权 |
+| 数据源级 | `.panda-api-test-agent/data-sources.md` | 经责任人确认的造数通道登记：名称/工具（含 MCP 类如 datafactory）、支持环境、能力范围、数据标签规范、清理方式；设计期判"可构造"的证据来源，由 L1 或责任人确认后维护 |
 | 运行级 | `.panda-api-test-agent/runs/<run-id>/package.json`、`result.json`、evidence | 单次计划与不可变执行事实 |
 
 组合关系：项目配置 + 接口画像 + 需求 context + 单次参数 = TestPackage。
@@ -25,12 +26,13 @@
 4. 所有实际使用资源必须来自同一环境节点，禁止 HTTP/Token/DB/Redis/MQ 跨环境拼接。
 5. 接口画像按需检查：路由/方法、请求参数、响应/业务码、鉴权、副作用和当前用例需要的 Oracle 足够即可执行；完整 Owner、双指纹、清理和外部边界在对应正式 EXECUTE/PROMOTE 或资产沉淀时补齐。
 6. 需求 context 缺失时，先由主 Agent 根据 PRD、用户输入和实际采用基线创建最小上下文；不得因无关 AC 或未使用资源缺失阻断当前可执行 AC。
+7. 数据源前置检查：判测试数据缺口前，先查 `data-sources.md` 登记与当前会话可用的造数类 MCP/连接器（如 datafactory），核对支持环境与授权；存在且匹配当前目标环境时不判缺，改判为『需造数动作设计』，把造数建模为声明 `object_ref`/`teardown`/数据标签的 fixture 写入任务纳入设计。判缺必须登记 evidence（查过的来源与不可构造原因），未登记 evidence 的缺口视为诊断不完整。
 
 配置或画像缺口必须映射到具体 `stage`、AC 或 case。只阻断依赖该缺口的项，其余项继续执行。临时 URL/Token 仅运行时注入，不写入配置。旧格式仍不能被消费或伪装为长期 Schema 2.1；如需继续当前测试，必须由 L1 依据可验证证据生成独立、可审计的临时 Schema 2.1 运行配置，不修改旧文件；正式资产由 L1 按需补齐。
 
 ## 2.1 AI 与脚本职责边界
 
-- AI/Skill 负责自然语言入口理解、工程按需扫描、业务语义解释、需求可验证性判断、测试维度选择和结果解释；项目适配层内容由 L1 负责初始化和维护，主 Agent 只负责判断和调度。
+- AI/Skill 负责自然语言入口理解、工程按需扫描、业务语义解释、需求可验证性判断、测试维度选择和结果解释；数据源前置检查（核对 `data-sources.md` 登记与会话内造数类 MCP）属于 AI 语义工作，在判缺前完成；项目适配层内容由 L1 负责初始化和维护，主 Agent 只负责判断和调度。
 - L1 脚本只提供可选的固定格式候选发现；其输出必须标记为候选，不等于已部署、已确认或可执行事实。
 - L2 设计脚本只结构化 AI 已作出的语义选择；无 AI 决策时，候选设计必须停在 `pending_ai_decision`，不得进入可执行范围。
 - 审核、凭据隔离、请求执行、请求次数、脱敏、指纹、结果统计和报告生成必须由确定性脚本兜底。
