@@ -2,7 +2,7 @@
 name: panda-ai-api-tester-v2
 description: 读取工程 L1 适配层，以结构化 TestPackage 为核心执行接口门禁、即时验证和稳定回归晋级，输出确定性的 TestResult 与 HTML 报告。用户要求验证接口、测试业务链路、诊断接口环境或将稳定用例纳入 pytest/CI 时使用。；v2 架构升级版
 agent_created: true
-version: 2.5.0
+version: 2.5.1
 ---
 
 # AI API Tester
@@ -21,20 +21,40 @@ version: 2.5.0
 
 ## 输入与固定产物
 
+所有路径均相对于当前项目工作区根目录。目录规范固定为：
+
+```text
+docs/
+├── test-config.md
+└── interface-profile/
+    └── <module>.md
+
+.panda-api-test-agent/
+├── requirements/
+│   └── <requirement-id>/
+├── runs/
+│   └── <run-id>/
+└── local/
+    └── runtime/
+```
+
+禁止将状态目录写为 `.workbuddy/.panda-api-test-agent/` 或 `.workbuddy/panda-api-test-agent/`。`docs/` 保存项目级、接口级长期 L1 资产；`.panda-api-test-agent/` 保存需求级、运行级及本机临时运行资产，不得相互搬移或复制形成多个事实源。
+
 必须读取：
 
 - `docs/test-config.md`：唯一支持项目级多环境 Schema 2.1；提供配置 revision、目标环境的变量引用和通用安全约束。
 - `docs/interface-profile/<module>.md`：面向人和 AI 的半结构化接口知识契约，包含唯一治理块、画像 revision、生命周期、Owner、副作用、清理边界和双指纹。
-- `.workbuddy/.panda-api-test-agent/requirements/<requirement-id>/context.json`：需求、固定基线、验收项和专项边界。
+- `.panda-api-test-agent/requirements/<requirement-id>/context.json`：需求、固定基线、验收项和专项边界。
 - 用户确认的目标环境、范围和副作用边界；临时 URL/凭据仅通过宿主构造的 RuntimeContext 运行时注入，不写入静态资产。
 
 按需生成：
 
-- `.workbuddy/.panda-api-test-agent/requirements/<requirement-id>/case-design.json`：由需求/AC 推导的候选用例设计。
-- `.workbuddy/.panda-api-test-agent/requirements/<requirement-id>/feasibility.json`：覆盖矩阵、执行依赖矩阵、待人工审核状态或审核后 `GATE-FEASIBILITY` 结果。
-- `.workbuddy/.panda-api-test-agent/runs/<run-id>/package.json`：人工审核后，批准范围通过最终可行性门禁才构建的结构化 `TestPackage 2.2`。
-- `.workbuddy/.panda-api-test-agent/runs/<run-id>/result.json`：结构化 `TestResult`。
-- `.workbuddy/.panda-api-test-agent/runs/<run-id>/evidence/`：脱敏请求、响应和断言证据。
+- `.panda-api-test-agent/requirements/<requirement-id>/case-design.json`：由需求/AC 推导的候选用例设计。
+- `.panda-api-test-agent/requirements/<requirement-id>/feasibility.json`：覆盖矩阵、执行依赖矩阵、待人工审核状态或审核后 `GATE-FEASIBILITY` 结果。
+- `.panda-api-test-agent/runs/<run-id>/package.json`：人工审核后，批准范围通过最终可行性门禁才构建的结构化 `TestPackage 2.2`。
+- `.panda-api-test-agent/runs/<run-id>/result.json`：结构化 `TestResult`。
+- `.panda-api-test-agent/runs/<run-id>/evidence/`：脱敏请求、响应和断言证据。
+- `.panda-api-test-agent/local/runtime/`：仅保存受控的本机运行时临时资产；不得保存项目配置、接口画像或可长期复用测试事实。
 - `reports/<run-id>.html`：由 `scripts/render_report.py` 从 `result.json` 确定性生成。
 - `tests/generated/`：仅 `PROMOTE` 模式生成 pytest 薄适配器。
 

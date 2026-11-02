@@ -6,6 +6,27 @@
 
 生成顺序固定为：`REQUIREMENT → CASE DESIGN（候选用例）→ FEASIBILITY / DATA PLAN → HUMAN REVIEW → FINAL GATE-FEASIBILITY → PACKAGE BUILD → PROBE/EXECUTE`。详细可行性结构见 `feasibility-plan-spec.md`。
 
+## 固定目录约定
+
+所有路径均相对于项目工作区根目录：
+
+```text
+docs/
+├── test-config.md
+└── interface-profile/
+    └── <module>.md
+
+.panda-api-test-agent/
+├── requirements/
+│   └── <requirement-id>/
+├── runs/
+│   └── <run-id>/
+└── local/
+    └── runtime/
+```
+
+项目配置和接口画像固定保存在 `docs/`；需求、运行和本机临时运行资产固定保存在工作区根目录的 `.panda-api-test-agent/`。禁止使用 `.workbuddy/.panda-api-test-agent/` 或 `.workbuddy/panda-api-test-agent/`，禁止复制 `docs/` 资产到状态目录形成第二事实源。
+
 ## 顶层结构
 
 ```json
@@ -16,7 +37,7 @@
     "workspace_id": "project-id",
     "system_id": "system-id",
     "requirement_refs": ["REQ-001"],
-    "requirement_context_path": ".workbuddy/.panda-api-test-agent/requirements/REQ-001/context.json"
+    "requirement_context_path": ".panda-api-test-agent/requirements/REQ-001/context.json"
   },
   "test_config": {
     "path": "docs/test-config.md",
@@ -125,10 +146,10 @@
 
 ## 项目配置绑定
 
-Runner 在发送请求前必须：
+新建 TestPackage 必须固定声明 `test_config.path="docs/test-config.md"`；不得改用状态目录、绝对路径或其他兼容别名。Runner 在发送请求前必须：
 
 1. 要求 `test_config.schema_version="2.1"` 和正整数 `config_revision`。
-2. 读取 `test_config.path`，要求唯一 `yaml test-config` 块、Schema 2.1、相同 project ID 和 revision。
+2. 读取 `test_config.path`，要求路径为 `docs/test-config.md`，并要求唯一 `yaml test-config` 块、Schema 2.1、相同 project ID 和 revision。
 3. 重新计算文件 SHA-256，与 `test_config.fingerprint` 比较。
 4. 要求 `test_config.environment_id == environment.environment_id`。
 5. 拒绝内联 `environment.base_url`；Base URL、认证、Origin 白名单和只读操作白名单只能通过 `environment.runtime_bindings` 声明。旧 `_env`/`_key` 字段和顶层 `authentication` 一律拒绝，必须重新生成 TestPackage。
@@ -137,11 +158,11 @@ Runner 在发送请求前必须：
 
 ## 接口画像绑定
 
-接口画像仍是面向人和 AI 的半结构化知识契约，不要求 Runner 解析全部业务正文；但每份画像必须有唯一 `yaml interface-profile-governance` 块。生成包时只允许从经 L1 维护且校验通过的治理块复制身份字段。
+接口画像仍是面向人和 AI 的半结构化知识契约，不要求 Runner 解析全部业务正文；但每份画像必须有唯一 `yaml interface-profile-governance` 块。生成包时只允许从经 L1 维护且校验通过的治理块复制身份字段。新建 TestPackage 的 `contract.profile_path` 必须匹配 `docs/interface-profile/<module>.md`，其中 `<module>` 为实际模块文件名；不得引用状态目录或该目录以外的画像副本。
 
 Runner 在发送请求前必须：
 
-1. 读取 `contract.profile_path`，要求唯一治理块且 `schema_version="1.0"`。
+1. 读取 `contract.profile_path`，要求路径匹配 `docs/interface-profile/<module>.md`，并要求唯一治理块且 `schema_version="1.0"`。
 2. 核对 `profile_id`、正整数 `profile_revision`、`code_baseline` 和 `lifecycle`；普通需求/链路执行要求画像与包内均为 `executable`，`execution_profile=single_api_quality` 可使用 `minimally_usable`、`confirmed` 或 `executable`，但必须在结果中披露治理边界。
 3. 重新计算画像的 `document_fingerprint`。计算前将治理块中的两个 fingerprint 值规范化为固定占位符，避免指纹自引用。
 4. 从画像治理块读取并核对 `contract_fingerprint`；该指纹由 L1 对规范化契约事实计算，Runner 不从自然语言正文重新推导业务语义。
