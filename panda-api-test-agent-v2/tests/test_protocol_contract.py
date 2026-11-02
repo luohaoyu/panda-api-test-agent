@@ -8,8 +8,10 @@ sys.path.insert(0, str(SKILL_DIR / "scripts"))
 from protocol_contract import (
     build_user_decision,
     normalize_artifact_metadata,
+    normalize_fact_decision,
     normalize_review,
     normalize_scan_fact,
+    require_confirmed_facts,
     result_verdict_to_requirement_status,
     validate_compatibility,
 )
@@ -58,6 +60,44 @@ class ProtocolContractTests(unittest.TestCase):
         self.assertEqual(result_verdict_to_requirement_status("passed", api_verifiability="none"), "not_verified")
         self.assertEqual(result_verdict_to_requirement_status("passed"), "accepted")
         self.assertEqual(result_verdict_to_requirement_status("blocked"), "blocked")
+
+    def test_fact_decision_requires_evidence_for_confirmation(self):
+        with self.assertRaisesRegex(ValueError, "evidence_refs"):
+            normalize_fact_decision({"status": "confirmed", "actor_type": "ai", "actor_id": "ai:semantic"}, fact_id="FACT-1")
+
+    def test_fact_decision_cannot_upgrade_ai_owned_fact_for_reviewer(self):
+        with self.assertRaisesRegex(ValueError, "confirmed by ai"):
+            normalize_fact_decision(
+                {"status": "confirmed", "actor_type": "ai", "actor_id": "ai:semantic", "evidence_refs": ["code:1"]},
+                fact_id="FACT-1",
+                fact_owner="reviewer",
+            )
+
+    def test_fact_decision_is_canonical_and_traceable(self):
+        decision = normalize_fact_decision(
+            {"status": "confirmed", "actor_type": "reviewer", "actor_id": "backend-owner", "evidence_refs": ["sig:1"], "decided_at": "2026-11-02T10:00:00+08:00"},
+            fact_id="FACT-1",
+            fact_owner="reviewer",
+        )
+        self.assertEqual(decision["artifact_type"], "scan_fact_decision")
+        self.assertEqual(decision["decision_owner"], "reviewer")
+        self.assertEqual(decision["evidence_refs"], ["sig:1"])
+        self.assertEqual(validate_compatibility(decision, "scan_fact_decision"), [])
+
+    def test_rejection_requires_reason(self):
+        with self.assertRaisesRegex(ValueError, "rationale"):
+            normalize_fact_decision({"status": "rejected", "actor_type": "ai", "actor_id": "ai:semantic", "evidence_refs": ["x"]}, fact_id="FACT-1")
+
+    def test_require_confirmed_facts_flags_candidates(self):
+        errors = require_confirmed_facts([
+            {"fact_id": "FACT-1", "status": "confirmed"},
+            {"fact_id": "FACT-2", "status": "candidate"},
+            {"fact_id": "FACT-3", "status": "trusted"},
+        ], context="package")
+        self.assertEqual(len(errors), 2)
+        self.assertTrue(any("FACT-2" in item for item in errors))
+        self.assertTrue(any("FACT-3" in item for item in errors))
+        self.assertEqual(require_confirmed_facts([{"fact_id": "FACT-1", "status": "confirmed"}]), [])
 
 
 if __name__ == "__main__":

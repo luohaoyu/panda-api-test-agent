@@ -10,7 +10,7 @@
 |---|---|---|
 | 项目级 | `.panda-api-test-agent/test-config.md`、`.panda-api-test-agent/adapter/` | 多环境 HTTP、认证、DB、Redis、MQ、可观测性、安全策略和项目适配规则 |
 | 接口级 | `.panda-api-test-agent/interface-profile/*.md` | 路径、Schema、错误码、前置数据、副作用和契约指纹 |
-| 需求级 | `.panda-api-test-agent/requirements/<id>/context.json` | PRD、代码基线、目标接口、AC、专项数据/风险/授权 |
+| 需求级 | `.panda-api-test-agent/requirements/<id>/context.json`、`external-evidence.jsonl` | PRD、代码基线、目标接口、AC、专项数据/风险/授权；以及 append-only 的外部验证层证据登记（UI/DB/MQ/审计/人工） |
 | 数据源级 | `.panda-api-test-agent/data-sources.md` | 经责任人确认的造数通道登记：名称/工具（含 MCP 类如 datafactory）、支持环境、能力范围、数据标签规范、清理方式；设计期判"可构造"的证据来源，由 L1 或责任人确认后维护 |
 | 运行级 | `.panda-api-test-agent/runs/<run-id>/package.json`、`result.json`、evidence | 单次计划与不可变执行事实 |
 
@@ -34,6 +34,7 @@
 
 - AI/Skill 负责自然语言入口理解、工程按需扫描、业务语义解释、需求可验证性判断、测试维度选择和结果解释；数据源前置检查（核对 `data-sources.md` 登记与会话内造数类 MCP）属于 AI 语义工作，在判缺前完成；项目适配层内容由 L1 负责初始化和维护，主 Agent 只负责判断和调度。
 - L1 脚本只提供可选的固定格式候选发现；其输出必须标记为候选，不等于已部署、已确认或可执行事实。
+- L1 事实账本（`docs/scan-facts/ledger.jsonl`）由 L1 独占写入；主 Agent 只读引用 `fact_id` 与确认状态，不确认、不改写、不复制成第二事实源。画像 `lifecycle=executable` 时未确认事实由 L1 校验与执行侧 `runner` 双重阻断。
 - L2 设计脚本只结构化 AI 已作出的语义选择；无 AI 决策时，候选设计必须停在 `pending_ai_decision`，不得进入可执行范围。
 - 审核、凭据隔离、请求执行、请求次数、脱敏、指纹、结果统计和报告生成必须由确定性脚本兜底。
 
@@ -174,8 +175,10 @@ Runner 禁止自动重试。连接中断、超时、5xx、写请求结果未知�
 
 生成路径固定为两步，不允许主 Agent 手工拼清单：
 
-1. `build_requirement_manifest_for_runs([run_dir...])` 读取 `requirement_aggregation` 的 `current` 投影（含 `current_cases`、`defects`、`residual_risks`、`external_evidence`），产出 `schema_version=1.0` 的报告清单；`report_id` 固定为 `AR-<requirement-id>-CURRENT`，同一需求只维护一个身份。
-2. `render_requirement_report.py <manifest> --output <report>` 确定性渲染，校验失败不得交付。
+1. `build_requirement_manifest_for_runs([run_dir...], store_root=...)` 读取 `requirement_aggregation` 的 `current` 投影（含 `current_cases`、`defects`、`residual_risks`、`external_evidence`）与需求级外部证据账本，产出 `schema_version=1.0` 的报告清单；`report_id` 固定为 `AR-<requirement-id>-CURRENT`，同一需求只维护一个身份。
+2. `refresh_requirement_report(...)` 完成校验、落盘和渲染；校验失败不得交付。等价于手工执行 `render_requirement_report.py <manifest> --output <report>`，但额外保证清单与报告同时更新、`release_recommendation` 与结论一致。
+
+外部验证层证据只经 `external_evidence.py::record_external_evidence` 登记，登记后必须重算报告。接口层事实不得走该通道（`layer=api/http/run` 直接拒绝）；`passed/failed` 无具体引用直接拒绝。`partial` 缺少外部证据时保持 `inconclusive` 并列为缺口，不得因“用户说验证过了”而改写结论。
 
 结论一致性：报告总体结论（PASS/BLOCKED/FAIL/INCONCLUSIVE）与清单里的 `release_recommendation` 必须由同一组 AC 事实推导。`BLOCKED` 由“存在被门禁阻塞且未执行的 AC”触发；只要有一条 `none` 或未执行 AC，结论就不会是 PASS，发布建议也不得写“可进入下一阶段”。
 

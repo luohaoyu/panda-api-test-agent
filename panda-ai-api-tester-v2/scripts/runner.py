@@ -141,6 +141,63 @@ def _normalized_profile_document(raw):
     )
 
 
+PROFILE_FACT_STATUSES = {"candidate", "confirmed", "rejected", "needs_reviewer", "superseded"}
+
+
+def _governance_fact_refs(body):
+    """Read the optional ``facts:`` refs written by L1 into the governance block.
+
+    Execution only needs to know whether the declared basis is settled, so this
+    stays a strict reader of the documented shape rather than a YAML dependency.
+    """
+    lines = body.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if re.match(r"^facts:\s*(?:#.*)?$", line):
+            start = index
+            break
+    if start is None:
+        return []
+    refs = []
+    current = None
+    for line in lines[start + 1 :]:
+        if not line.strip():
+            continue
+        if not line.startswith((" ", "\t")):
+            break
+        item = re.match(r"^\s*-\s+([A-Za-z_]+):\s*(.*)$", line)
+        if item:
+            current = {item.group(1): item.group(2).strip()}
+            refs.append(current)
+            continue
+        field = re.match(r"^\s+([A-Za-z_]+):\s*(.*)$", line)
+        if field and current is not None:
+            current[field.group(1)] = field.group(2).strip()
+    return refs
+
+
+def _assert_profile_facts_settled(fact_refs, lifecycle):
+    if not fact_refs:
+        return
+    seen = set()
+    for ref in fact_refs:
+        fact_id = (ref.get("fact_id") or "").strip()
+        if not fact_id:
+            raise RunnerError("interface profile governance facts entry requires fact_id")
+        if fact_id in seen:
+            raise RunnerError(f"interface profile governance duplicate fact_id: {fact_id}")
+        seen.add(fact_id)
+        status = (ref.get("status") or "").strip()
+        if status not in PROFILE_FACT_STATUSES:
+            raise RunnerError(f"interface profile fact {fact_id} has unsupported status: {status or 'missing'}")
+        if status == "confirmed" and not (ref.get("confirmed_by") or "").strip():
+            raise RunnerError(f"interface profile fact {fact_id} confirmed status requires confirmed_by")
+        if lifecycle == "executable" and status != "confirmed":
+            raise RunnerError(
+                f"PROFILE_FACTS_UNCONFIRMED: fact {fact_id} is {status}, executable profile requires confirmed facts"
+            )
+
+
 def load_interface_profile_identity(path, *, allow_drafted=False):
     profile_path = Path(path).resolve()
     if not profile_path.is_file():
@@ -174,6 +231,8 @@ def load_interface_profile_identity(path, *, allow_drafted=False):
     ).hexdigest()
     if actual_document_fingerprint.lower() != document_fingerprint.lower():
         raise RunnerError("interface profile document_fingerprint mismatch")
+    fact_refs = _governance_fact_refs(body)
+    _assert_profile_facts_settled(fact_refs, lifecycle)
     if not allow_drafted:
         owners_block = re.search(r"(?ms)^owners:\s*\n(?P<body>(?:^[ \t]+[^\n]+\n?)+)", body)
         if not owners_block:
@@ -192,7 +251,100 @@ def load_interface_profile_identity(path, *, allow_drafted=False):
         "lifecycle": lifecycle,
         "document_fingerprint": document_fingerprint,
         "contract_fingerprint": contract_fingerprint,
+        "fact_refs": fact_refs,
     }
+
+
+CONTRACT_ROLES = ("trigger", "oracle", "negative_oracle")
+CONTRACT_IDENTITY_FIELDS = (
+    "profile_path", "governance_schema_version", "profile_id", "profile_revision",
+    "code_baseline", "lifecycle", "document_fingerprint", "contract_fingerprint",
+)
+EXECUTION_LIFECYCLES = {"minimally_usable", "confirmed", "executable"}
+
+
+def normalize_contract_bindings(package):
+    """Return role-tagged contract bindings, normalising the legacy single contract.
+
+    A requirement-level package asserts on more interfaces than the one it
+    triggers: log, trace and negative-visibility interfaces act as Oracles and
+    need the same revision/lifecycle/fingerprint governance as the trigger. The
+    single ``contract`` object could not express that, so ``contracts`` is a
+    list. A package that still declares ``contract`` is read as one ``trigger``
+    binding and keeps its previous behaviour.
+    """
+    raw = package.get("contracts")
+    if raw is None:
+        contract = package.get("contract")
+        if isinstance(contract, dict) and contract:
+            binding = deepcopy(contract)
+            binding.setdefault("role", "trigger")
+            return [binding]
+        return []
+    if not isinstance(raw, list) or not raw:
+        raise RunnerError("contracts must be a non-empty list of contract bindings")
+    bindings = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict) or not item:
+            raise RunnerError(f"contracts[{index}] must be a non-empty object")
+        binding = deepcopy(item)
+        binding["role"] = str(binding.get("role") or "trigger").strip().lower()
+        bindings.append(binding)
+    return bindings
+
+
+def validate_contract_bindings(package, *, allow_drafted=False):
+    """Fail-closed preflight for every interface profile a package asserts on.
+
+    Each binding is checked against its own profile document, so an Oracle whose
+    profile drifted, was downgraded below the execution lifecycle, or carries
+    unconfirmed facts blocks the run instead of silently feeding assertions.
+    """
+    bindings = normalize_contract_bindings(package)
+    if not bindings:
+        raise RunnerError("package requires contract or contracts interface profile bindings")
+    seen = set()
+    triggers = 0
+    for index, binding in enumerate(bindings):
+        role = binding.get("role")
+        if role not in CONTRACT_ROLES:
+            raise RunnerError(f"contracts[{index}].role must be one of {', '.join(CONTRACT_ROLES)}")
+        if role == "trigger":
+            triggers += 1
+        elif not str(binding.get("interface_ref") or "").strip():
+            raise RunnerError(f"contracts[{index}] role {role} requires interface_ref")
+        missing = [field for field in CONTRACT_IDENTITY_FIELDS if binding.get(field) in (None, "")]
+        if missing:
+            raise RunnerError(
+                f"contracts[{index}] ({role}) missing interface profile identity fields: " + ", ".join(missing)
+            )
+        if not allow_drafted and binding.get("lifecycle") not in EXECUTION_LIFECYCLES:
+            raise RunnerError(
+                f"contracts[{index}] ({role}) lifecycle must be minimally_usable, confirmed, or executable for EXECUTE"
+            )
+        identity = load_interface_profile_identity(binding.get("profile_path"), allow_drafted=allow_drafted)
+        for field in CONTRACT_IDENTITY_FIELDS[1:]:
+            if str(identity.get(field)).lower() != str(binding.get(field)).lower():
+                raise RunnerError(f"interface profile {field} mismatch for contracts[{index}] ({role})")
+        if not allow_drafted and identity.get("lifecycle") not in EXECUTION_LIFECYCLES:
+            raise RunnerError(f"interface profile lifecycle does not allow EXECUTE for contracts[{index}] ({role})")
+        key = (identity.get("profile_id"), role)
+        if key in seen:
+            raise RunnerError(
+                f"duplicate contract binding for profile {identity.get('profile_id')} with role {role}"
+            )
+        seen.add(key)
+    if triggers != 1:
+        raise RunnerError("contracts requires exactly one trigger binding")
+    return bindings
+
+
+def primary_contract_binding(bindings):
+    """Return the trigger binding in the legacy single-contract shape."""
+    for binding in bindings:
+        if binding.get("role") == "trigger":
+            return {key: value for key, value in binding.items() if key != "role"}
+    return {}
 
 
 def slug(value):
@@ -1032,6 +1184,7 @@ class ApiTestRunner:
         self.write_attempt_risks = []
         self.residual_risks = []
         self.plan_fingerprint = None
+        self.contract_bindings = []
         self.review = self.package.get("review") or {}
         self.approved_case_ids = set()
         self.blocked_case_ids = set()
@@ -1157,7 +1310,8 @@ class ApiTestRunner:
             "feasibility": redact(self.package.get("feasibility") or {}, secrets=self.evidence.secrets),
             "package_build": redact(self.package.get("package_build") or {}, secrets=self.evidence.secrets),
             "review": {key: value for key, value in self.review.items() if key not in {"comment", "findings"}},
-            "contract": self.package.get("contract") or {},
+            "contract": primary_contract_binding(self.contract_bindings) or (self.package.get("contract") or {}),
+            "contracts": self.contract_bindings,
             "test_config": self.package.get("test_config") or {},
             "project": redact(self.package.get("project") or {}, secrets=self.evidence.secrets),
             "environment": {"environment_id": self.environment.get("environment_id", "unknown"), "base_url": redact_url(self.base_url), "production": bool(self.environment.get("production", False)), "runtime_status": self._environment_runtime_status(gate_results, case_results), "runtime_context": self.runtime_context.metadata()},
@@ -1223,12 +1377,14 @@ class ApiTestRunner:
                 ApiTestRunner._reject_inline_sensitive_headers(item, f"{location}[{index}]")
 
     def _validate_package(self):
-        required = ["schema_version", "package_id", "project", "test_config", "mode", "contract", "environment", "risk", "cases"]
+        required = ["schema_version", "package_id", "project", "test_config", "mode", "environment", "risk", "cases"]
         missing = [field for field in required if field not in self.package]
         if missing:
             raise RunnerError("package missing required fields: " + ", ".join(missing))
-        if self.package.get("schema_version") not in {"2.1", "2.2"}:
-            raise RunnerError("package schema_version must be 2.1 (legacy) or 2.2")
+        if not (isinstance(self.package.get("contract"), dict) or isinstance(self.package.get("contracts"), list)):
+            raise RunnerError("package missing required fields: contract or contracts")
+        if self.package.get("schema_version") not in {"2.1", "2.2", "2.3"}:
+            raise RunnerError("package schema_version must be 2.1 (legacy), 2.2, or 2.3")
         feasibility_errors = validate_package_feasibility(self.package)
         if feasibility_errors:
             raise RunnerError("; ".join(feasibility_errors))
@@ -1254,24 +1410,10 @@ class ApiTestRunner:
         project_id = (self.package.get("project") or {}).get("workspace_id")
         if project_id and config_identity.get("project_id") != project_id:
             raise RunnerError("test config project_id does not match package project.workspace_id")
-        contract = self.package.get("contract") or {}
         fast_single_api = self.package.get("execution_profile") == "single_api_quality"
-        required_contract = (
-            "profile_path", "governance_schema_version", "profile_id", "profile_revision",
-            "code_baseline", "lifecycle", "document_fingerprint", "contract_fingerprint",
-        )
-        missing_contract = [field for field in required_contract if contract.get(field) in (None, "")]
-        if missing_contract:
-            raise RunnerError("contract missing required interface profile identity fields: " + ", ".join(missing_contract))
-        allowed_execution_lifecycles = {"minimally_usable", "confirmed", "executable"}
-        if not fast_single_api and contract.get("lifecycle") not in allowed_execution_lifecycles:
-            raise RunnerError("contract lifecycle must be minimally_usable, confirmed, or executable for EXECUTE")
-        profile_identity = load_interface_profile_identity(contract.get("profile_path"), allow_drafted=fast_single_api)
-        for field in required_contract[1:]:
-            if str(profile_identity.get(field)).lower() != str(contract.get(field)).lower():
-                raise RunnerError(f"interface profile {field} mismatch")
-        if not fast_single_api and profile_identity.get("lifecycle") not in allowed_execution_lifecycles:
-            raise RunnerError("interface profile lifecycle does not allow EXECUTE")
+        # Every interface the package asserts on is validated, not only the one it
+        # triggers: Oracle profiles carry the same governance obligations.
+        self.contract_bindings = validate_contract_bindings(self.package, allow_drafted=fast_single_api)
         if not isinstance(self.package.get("cases"), list) or not self.package["cases"]:
             raise RunnerError("package requires at least one case")
         case_ids = [case.get("case_id") for case in self.package["cases"]]

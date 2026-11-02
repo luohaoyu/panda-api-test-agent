@@ -331,17 +331,17 @@ def validate_feasibility_plan(design: dict[str, Any], plan: dict[str, Any]) -> l
 
 
 def validate_package_feasibility(package: dict[str, Any]) -> list[str]:
-    """Validate the immutable feasibility snapshot embedded in TestPackage 2.2."""
+    """Validate the immutable feasibility snapshot embedded in TestPackage 2.2 / 2.3."""
     if package.get("schema_version") == "2.1":
         return []
-    if package.get("schema_version") != "2.2":
-        return ["package schema_version must be 2.1 (legacy) or 2.2"]
+    if package.get("schema_version") not in {"2.2", "2.3"}:
+        return ["package schema_version must be 2.1 (legacy), 2.2, or 2.3"]
     feasibility = package.get("feasibility")
     build = package.get("package_build")
     if not isinstance(feasibility, dict):
-        return ["FEASIBILITY_PLAN_REQUIRED: TestPackage 2.2 requires feasibility"]
+        return ["FEASIBILITY_PLAN_REQUIRED: TestPackage 2.2/2.3 requires feasibility"]
     if not isinstance(build, dict) or build.get("status") != "compiled":
-        return ["PACKAGE_BUILD_REQUIRED: TestPackage 2.2 requires package_build.status=compiled"]
+        return ["PACKAGE_BUILD_REQUIRED: TestPackage 2.2/2.3 requires package_build.status=compiled"]
     errors = []
     if feasibility.get("schema_version") not in {FEASIBILITY_SCHEMA_VERSION, LEGACY_FEASIBILITY_SCHEMA_VERSION}:
         errors.append(

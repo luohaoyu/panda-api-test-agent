@@ -431,9 +431,25 @@ def _read_json(path: str | Path) -> dict[str, Any]:
     return value
 
 
-def _item_verdict(verifiability: str, statuses: set[str], evidence_sound: bool) -> tuple[str, str, str]:
-    """Map case facts to one acceptance item, without ever upgrading a pass."""
+_EXTERNAL_STATUSES = {"passed", "failed", "blocked", "missing"}
+
+
+def _item_verdict(verifiability: str, statuses: set[str], evidence_sound: bool, external: dict[str, Any] | None = None) -> tuple[str, str, str]:
+    """Map case facts plus external evidence to one acceptance item.
+
+    A pass is never upgraded: ``partial`` needs both layers closed, ``none`` can
+    only be closed by registered external evidence, and an external failure
+    always wins so a contradictory record cannot hide behind an API pass.
+    """
+    fact = external if isinstance(external, dict) else {}
+    external_status = fact.get("status") if fact.get("status") in _EXTERNAL_STATUSES else "missing"
     if verifiability == "none":
+        if external_status == "passed":
+            return "complete", "passed", "接口层不可验证；外部验证层证据闭合"
+        if external_status == "failed":
+            return "complete", "failed", "外部验证层记录失败"
+        if external_status == "blocked":
+            return "not_run", "blocked", "外部验证层被阻塞"
         return "not_run", "not_run", "接口层不可验证"
     if not statuses:
         return "not_run", "not_run", "未映射到接口用例"
@@ -444,14 +460,33 @@ def _item_verdict(verifiability: str, statuses: set[str], evidence_sound: bool) 
         return "not_run", "blocked", "被门禁阻塞，未发送请求"
     if statuses == {"not_run"}:
         return "not_run", "not_run", "未执行"
-    if statuses == {"passed"}:
-        if evidence_sound:
-            return "complete", "passed", "接口层完整执行并通过"
-        return "complete", "inconclusive", "接口层通过但证据链未闭合"
-    return "partial", "inconclusive", "仅部分用例执行"
+    if statuses != {"passed"}:
+        return "partial", "inconclusive", "仅部分用例执行"
+    if verifiability == "partial":
+        if not evidence_sound:
+            return "partial", "inconclusive", "接口层通过但证据链未闭合"
+        if external_status == "passed":
+            return "complete", "passed", "接口层与外部验证层证据均已闭合"
+        if external_status == "failed":
+            return "complete", "failed", "接口层通过但外部验证层记录失败"
+        if external_status == "blocked":
+            return "partial", "blocked", "外部验证层被阻塞"
+        return "partial", "inconclusive", "接口层通过，外部验证层证据缺失"
+    if external_status == "failed":
+        return "complete", "failed", "接口层通过但外部验证层记录失败（证据冲突）"
+    if evidence_sound:
+        return "complete", "passed", "接口层完整执行并通过"
+    return "complete", "inconclusive", "接口层通过但证据链未闭合"
 
 
-def _acceptance_items(criteria: list[dict[str, Any]], tasks: dict[str, dict[str, Any]], case_records: dict[str, dict[str, Any]], run_verdicts: dict[str, str]) -> list[dict[str, Any]]:
+def _acceptance_items(
+    criteria: list[dict[str, Any]],
+    tasks: dict[str, dict[str, Any]],
+    case_records: dict[str, dict[str, Any]],
+    run_verdicts: dict[str, str],
+    external_by_ac: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    external_by_ac = external_by_ac or {}
     items = []
     for index, criterion in enumerate(criteria, 1):
         ac_id = criterion.get("ac_id") or criterion.get("id") or f"AC-{index}"
@@ -462,10 +497,26 @@ def _acceptance_items(criteria: list[dict[str, Any]], tasks: dict[str, dict[str,
         source_runs = {record.get("source_run_id") for record in records if record.get("source_run_id")}
         evidence_sound = bool(refs) and bool(source_runs) and all(run_verdicts.get(run_id) == "passed" for run_id in source_runs)
         verifiability = criterion.get("interface_verifiability", "direct")
-        execution_status, verdict, actual = _item_verdict(verifiability, statuses if ac_task_ids else set(), evidence_sound)
+        external = external_by_ac.get(ac_id) or {}
+        external_status = external.get("status") if external.get("status") in _EXTERNAL_STATUSES else "missing"
+        execution_status, verdict, actual = _item_verdict(
+            verifiability,
+            statuses if ac_task_ids else set(),
+            evidence_sound,
+            external,
+        )
         gaps = list(criterion.get("gaps") or [])
         if verdict != "passed":
             gaps.append("证据或执行链尚未闭合")
+        evidence_refs: list[str] = []
+        if verdict == "passed":
+            evidence_refs = sorted(source_runs)
+            if verifiability in {"none", "partial"}:
+                # The report only accepts refs it can resolve to immutable evidence,
+                # so an external closure cites registry ids, not free-text paths.
+                evidence_refs = sorted(set(evidence_refs) | set(external.get("evidence_ids") or []))
+        if external_status in {"missing", "blocked"} and verifiability in {"none", "partial"}:
+            gaps.append("缺少外部验证层证据")
         items.append({
             "id": ac_id,
             "title": criterion.get("text") or criterion.get("title") or ac_id,
@@ -478,8 +529,13 @@ def _acceptance_items(criteria: list[dict[str, Any]], tasks: dict[str, dict[str,
             "verdict": verdict,
             "actual": actual,
             "gaps": gaps,
-            "evidence_refs": sorted(source_runs) if verdict == "passed" else [],
+            "evidence_refs": evidence_refs,
             "issue_refs": list(criterion.get("issue_refs") or []),
+            "external_evidence": {
+                "status": external_status,
+                "refs": list(external.get("refs") or []),
+                "layers": dict(external.get("layers") or {}),
+            },
         })
     return items
 
@@ -640,6 +696,8 @@ def build_requirement_manifest_for_runs(
     acceptance_criteria: list[dict[str, Any]] | None = None,
     title: str | None = None,
     external_evidence: dict[str, Any] | None = None,
+    external_evidence_records: list[dict[str, Any]] | None = None,
+    store_root: str | Path | None = None,
     previous_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project many Runs into one renderable ``current`` requirement manifest.
@@ -648,6 +706,10 @@ def build_requirement_manifest_for_runs(
     this function only projects that truth into the report schema. Without it the
     documented "one current report per requirement" flow had no executable path,
     because the aggregation output (schema 1.1) is not what the renderer accepts.
+
+    ``external_evidence_records`` (or ``store_root``, from which the append-only
+    ledger is loaded) supplies the non-API acceptance facts that ``partial`` and
+    ``none`` criteria need in order to close.
     """
     roots = [Path(item).resolve() for item in run_dirs]
     if not roots:
@@ -660,12 +722,33 @@ def build_requirement_manifest_for_runs(
     if not resolved_requirement:
         raise OrchestrationError("requirement_id is required to aggregate runs")
 
+    evidence_mod = _load_local("external_evidence", _THIS.parent / "external_evidence.py")
+    if external_evidence_records is not None:
+        if store_root is None:
+            raise OrchestrationError("store_root is required when external evidence records are supplied")
+        records = list(external_evidence_records)
+    elif store_root is not None:
+        records = evidence_mod.load_external_evidence(store_root, resolved_requirement)
+    else:
+        records = []
+    summary = evidence_mod.summarize_external_evidence(records) if records else None
+    flat_evidence = None
+    if summary:
+        flat_evidence = {
+            "status": summary["rollup_status"],
+            "refs": summary["refs"],
+            "supports": summary["supports"],
+            "missing": summary["missing"],
+        }
+    if external_evidence:
+        flat_evidence = {**(flat_evidence or {}), **external_evidence}
+
     aggregation_mod = _load_local("requirement_aggregation", _THIS.parent / "requirement_aggregation.py")
     aggregate = aggregation_mod.build_current_requirement_manifest(
         resolved_requirement,
         roots,
         previous_manifest=previous_manifest,
-        external_evidence=external_evidence,
+        external_evidence=flat_evidence,
     )
 
     results = {
@@ -695,7 +778,26 @@ def build_requirement_manifest_for_runs(
     }
     run_verdicts = {item.get("run_id"): item.get("status") for item in aggregate.get("runs") or [] if isinstance(item, dict)}
 
-    items = _acceptance_items(acceptance_criteria, tasks, case_records, run_verdicts)
+    known_ac_ids = {
+        str(item.get("ac_id") or item.get("id"))
+        for item in acceptance_criteria
+        if isinstance(item, dict) and (item.get("ac_id") or item.get("id"))
+    }
+    if records:
+        unknown = evidence_mod.unknown_acceptance_ids(records, known_ac_ids)
+        if unknown:
+            raise OrchestrationError(
+                "external evidence references acceptance criteria that do not exist in the requirement: "
+                + ", ".join(unknown)
+            )
+
+    items = _acceptance_items(
+        acceptance_criteria,
+        tasks,
+        case_records,
+        run_verdicts,
+        external_by_ac=(summary or {}).get("per_ac"),
+    )
     issues = (
         _gap_issues(items)
         + _defect_issues(aggregate.get("defects") or [], tasks)
@@ -703,6 +805,8 @@ def build_requirement_manifest_for_runs(
     )
     verdict = _overall_verdict(items, issues)
     evidence = _evidence_runs(roots, results)
+    if records and store_root is not None:
+        evidence = evidence + evidence_mod.evidence_run_entries(records, store_root, resolved_requirement)
     for entry in evidence:
         # The ledger-recomputed verdict is authoritative over a possibly stale result.json.
         ledger_status = run_verdicts.get(entry["id"])
@@ -730,6 +834,57 @@ def build_requirement_manifest_for_runs(
             "run_count": len(aggregate.get("runs") or []),
             "external_evidence": aggregate.get("external_evidence"),
         },
+        "external_evidence": summary or {"status": "none", "per_ac": {}, "record_count": 0},
+    }
+
+
+def refresh_requirement_report(
+    run_dirs: Any,
+    *,
+    requirement_id: str | None = None,
+    store_root: str | Path,
+    output_json: str | Path,
+    output_html: str | Path,
+    title: str | None = None,
+    acceptance_criteria: list[dict[str, Any]] | None = None,
+    previous_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Recompute the one ``current`` requirement report after evidence changes.
+
+    This is the only supported path from "new evidence registered" to "published
+    report": the manifest is rebuilt from the immutable Run ledgers plus the
+    append-only evidence ledger, validated by the renderer, and then rendered.
+    ``store_root`` is required so a registered evidence ledger can never be
+    silently dropped from the report.
+    """
+    manifest = build_requirement_manifest_for_runs(
+        run_dirs,
+        requirement_id=requirement_id,
+        acceptance_criteria=acceptance_criteria,
+        title=title,
+        store_root=store_root,
+        previous_manifest=previous_manifest,
+    )
+    renderer = _load_local("render_requirement_report", _THIS.parent / "render_requirement_report.py")
+    manifest_path = Path(output_json).resolve()
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    # Evidence paths are written absolute, so validation must not depend on cwd.
+    errors = renderer.validate(manifest, base_dir=manifest_path.parent)
+    if errors:
+        raise OrchestrationError("requirement report is not renderable: " + "; ".join(errors))
+    _write_json_atomic(manifest_path, manifest)
+    report_path = Path(output_html).resolve()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(renderer.render(manifest), encoding="utf-8", newline="\n")
+    verdict, reason = renderer.overall_verdict(manifest)
+    if manifest["release_recommendation"] != _RELEASE_RECOMMENDATION[verdict]:
+        raise OrchestrationError("release_recommendation contradicts the rendered verdict")
+    return {
+        "manifest": str(manifest_path),
+        "report": str(report_path),
+        "verdict": verdict,
+        "verdict_reason": reason,
+        "external_evidence": manifest.get("external_evidence"),
     }
 
 

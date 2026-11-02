@@ -107,7 +107,16 @@ def _resolve_template(design: dict[str, Any], execution_assets: dict[str, Any] |
             "approved design requires package_template or execution_assets; "
             "the compiler will not invent config/profile/runtime bindings"
         )
-    missing = [field for field in REQUIRED_ASSETS if not isinstance(template.get(field), dict)]
+    missing = []
+    for field in REQUIRED_ASSETS:
+        if field == "contract":
+            if isinstance(template.get("contract"), dict):
+                continue
+            if isinstance(template.get("contracts"), list) and template["contracts"]:
+                continue
+            missing.append(field)
+        elif not isinstance(template.get(field), dict):
+            missing.append(field)
     if missing:
         raise PackageCompileError("execution assets missing required fields: " + ", ".join(missing))
     return copy.deepcopy(template)
@@ -183,13 +192,25 @@ def compile_approved_package(
 
     package = _resolve_template(design, execution_assets)
     package.update({
-        "schema_version": "2.2",
+        "schema_version": "2.3" if isinstance(package.get("contracts"), list) and package["contracts"] else "2.2",
         "package_id": package_id or design.get("package_id") or f"PKG-{design.get('requirement_id', 'API')}",
         "mode": str(design.get("mode", package.get("mode", "EXECUTE"))).upper(),
         "cases": cases,
     })
-    for field in ("project", "test_config", "contract", "environment", "risk"):
+    for field in ("project", "test_config", "environment", "risk"):
         package[field] = copy.deepcopy(package[field])
+    # A multi-contract package keeps the full role-tagged list and mirrors the
+    # trigger binding into ``contract`` so single-contract consumers (reports,
+    # promotion, legacy results) keep working unchanged.
+    if isinstance(package.get("contracts"), list) and package["contracts"]:
+        package["contracts"] = copy.deepcopy(package["contracts"])
+        trigger = next(
+            (item for item in package["contracts"] if str(item.get("role", "trigger")).strip().lower() == "trigger"),
+            package["contracts"][0],
+        )
+        package["contract"] = {key: value for key, value in copy.deepcopy(trigger).items() if key != "role"}
+    else:
+        package["contract"] = copy.deepcopy(package["contract"])
     for field in ("requirements", "business_rules", "scenarios", "gates", "fixtures", "known_gaps", "auth_probe"):
         if field in design:
             package[field] = copy.deepcopy(design[field])

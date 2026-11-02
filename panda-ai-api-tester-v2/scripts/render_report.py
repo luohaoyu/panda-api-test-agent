@@ -44,7 +44,7 @@ STATUS_LABELS = {
     "none": "无副作用",
     "waived": "已风险豁免",
 }
-VALIDATOR_SHA256 = "1d29f40613d3afc4a1b761dbce7523b41e62a9bb15bad54fd70910145bd15523"
+VALIDATOR_SHA256 = "07e30f62c8ee90c33002ecc72c51be1b6d28bd7b3f8eb3655696bbf3cc396edc"
 
 VERDICT_LABELS = {
     "passed": ("PASS", "全部必需验证已通过"),
@@ -650,6 +650,17 @@ def main():
     gate_passed = sum(1 for gate in gates if gate.get("status") == "passed")
     gate_problem = len(gates) - gate_passed
     contract_fingerprint = contract.get("contract_fingerprint") or "-"
+    contract_bindings = data.get("contracts") or []
+    contract_roles_text = " · ".join(
+        f'{item.get("role") or "trigger"}→{item.get("profile_id") or "-"}@{item.get("profile_revision") or "-"}'
+        for item in contract_bindings
+        if isinstance(item, dict)
+    ) or "-"
+    contract_roles_html = (
+        f'<div class="info-item"><span>契约绑定</span><strong>{esc(contract_roles_text)}</strong></div>'
+        if len(contract_bindings) > 1
+        else ""
+    )
     plan_fingerprint = plan.get("plan_fingerprint") or "-"
     if len(plan_fingerprint) > 30:
         plan_fingerprint = plan_fingerprint[:22] + "…" + plan_fingerprint[-8:]
@@ -720,6 +731,7 @@ def main():
     <div class="info-item"><span>计划指纹</span><code title="{esc(plan.get("plan_fingerprint") or "-")}">{esc(plan_fingerprint)}</code></div>
     <div class="info-item"><span>审核人 / 审核时间</span><strong>{esc(review.get("reviewer") or "-")} · {format_time(review.get("approved_at"))}</strong></div>
     <div class="info-item"><span>契约指纹</span><code title="{esc(contract.get("contract_fingerprint") or "-")}">{esc(contract_fingerprint)}</code></div>
+    {contract_roles_html}
     <div class="info-item"><span>开始时间</span><strong>{format_time(data.get("started_at"))}</strong></div>
     <div class="info-item"><span>结束时间</span><strong>{format_time(data.get("finished_at"))}</strong></div>
     <div class="info-item"><span>报告生成</span><strong>{format_time(generated_at)}</strong></div>

@@ -2,14 +2,14 @@
 name: panda-ai-api-tester-v2
 description: 读取工程 L1 适配层，以结构化 TestPackage 为核心执行接口门禁、即时验证和稳定回归晋级，输出确定性的 TestResult 与 HTML 报告。用户要求验证接口、测试业务链路、诊断接口环境或将稳定用例纳入 pytest/CI 时使用。；v2 架构升级版
 agent_created: true
-version: 2.5.1
+version: 2.6.1
 ---
 
 # AI API Tester
 
 ## 定位
 
-作为 L2 通用接口测试执行层，只读项目级多环境 `test-config.md` Schema 2.1、接口画像和需求 context，先从需求设计候选用例，再规划覆盖与执行依赖；数据、凭证、fixture、Oracle 或 cleanup 缺口只记录为规划事实，不在规划阶段停止流程。完成人工审核后，按审核批准范围执行最终可行性门禁，通过后构建 TestPackage 2.2，执行运行门禁或业务测试，保存结构化 TestResult，再通过固定报告器生成 HTML。Runner 仅兼容执行既有 TestPackage 2.1，不允许新建流程借 2.1 绕过规划与审核。
+作为 L2 通用接口测试执行层，只读项目级多环境 `test-config.md` Schema 2.1、接口画像和需求 context，先从需求设计候选用例，再规划覆盖与执行依赖；数据、凭证、fixture、Oracle 或 cleanup 缺口只记录为规划事实，不在规划阶段停止流程。完成人工审核后，按审核批准范围执行最终可行性门禁，通过后构建 TestPackage 2.3（多契约）或 2.2（单契约），执行运行门禁或业务测试，保存结构化 TestResult，再通过固定报告器生成 HTML。Runner 仅兼容执行既有 TestPackage 2.1/2.2，不允许新建流程降级绕过规划与审核。
 
 遵循 **AI 指令约束优先，脚本能力辅助**：AI/Skill 负责理解接口语义、判断质量维度适用性、设计断言和解释缺口；脚本只把 AI 已确认的设计结构化，执行请求，校验审核范围，保护凭据，统计结果和生成证据。没有 AI 语义决策时，脚本输出的质量维度只能是候选设计，不得直接作为已确认测试范围。运行验证只输出 runtime status、契约差异观察和证据，不回写项目配置或接口画像。
 
@@ -51,7 +51,7 @@ docs/
 
 - `.panda-api-test-agent/requirements/<requirement-id>/case-design.json`：由需求/AC 推导的候选用例设计。
 - `.panda-api-test-agent/requirements/<requirement-id>/feasibility.json`：覆盖矩阵、执行依赖矩阵、待人工审核状态或审核后 `GATE-FEASIBILITY` 结果。
-- `.panda-api-test-agent/runs/<run-id>/package.json`：人工审核后，批准范围通过最终可行性门禁才构建的结构化 `TestPackage 2.2`。
+- `.panda-api-test-agent/runs/<run-id>/package.json`：人工审核后，批准范围通过最终可行性门禁才构建的结构化 `TestPackage`；需求级多接口场景用 2.3 的 `contracts`（trigger / oracle / negative_oracle），单接口场景用 2.2 的单 `contract`。
 - `.panda-api-test-agent/runs/<run-id>/result.json`：结构化 `TestResult`。
 - `.panda-api-test-agent/runs/<run-id>/evidence/`：脱敏请求、响应和断言证据。
 - `.panda-api-test-agent/local/runtime/`：仅保存受控的本机运行时临时资产；不得保存项目配置、接口画像或可长期复用测试事实。
@@ -114,7 +114,7 @@ docs/
 3. **FEASIBILITY / DATA PLAN**：逐条分析候选用例的数据、凭证、环境、fixture、Oracle 和 cleanup 依赖，生成 `coverage_map` 与 `dependency_matrix`。每条候选用例必须显式声明 `execution_dependencies`；无额外依赖时写空数组。缺少数据或执行事实时记录 `status=blocked`、`known_gap`、责任人和下一步，但规划必须继续完成；此时门禁为 `pending_review`，不得把数据缺口误报为流程失败。
 4. **HUMAN REVIEW**：向审核人提交完整候选范围、依赖矩阵和覆盖边界。审核人决定全量批准、只批准依赖已闭合的子集、暂缓部分用例、驳回或要求补充。审核范围外用例保留为 `not_run`/未覆盖边界，不得静默删除。
 5. **FINAL GATE-FEASIBILITY**：在任何 RuntimeContext、Secret envelope、fixture 或 HTTP 之前，按人工审核批准范围计算最终静态门禁。只有批准范围仍包含 `candidate_only`、未声明依赖、未解决依赖、未知 case 依赖或依赖环时，才停止在 Package Build 前。若人工只批准依赖已闭合的子集，则门禁通过并继续该子集，但不得宣称完整需求通过。
-6. **PACKAGE BUILD**：只有人工审核完成且最终门禁通过后，才调用 `compile_approved_package(..., feasibility_plan=plan)` 构建 TestPackage 2.2，并绑定配置 revision、画像身份、审核范围、可行性快照及源指纹。既有 2.1 包只做兼容执行；新包不得降级到 2.1 绕过规划、审核或门禁。
+6. **PACKAGE BUILD**：只有人工审核完成且最终门禁通过后，才调用 `compile_approved_package(..., feasibility_plan=plan)` 构建 TestPackage，并绑定配置 revision、画像身份（需求级场景为 `contracts` 角色列表）、审核范围、可行性快照及源指纹。既有 2.1/2.2 包只做兼容执行；新包不得降级绕过规划、审核或门禁。
 7. 选择 `PROBE` 或 `EXECUTE`；允许 `minimally_usable` 画像支持受控、局部执行，但必须披露治理和完整覆盖边界。
 8. 执行运行时门禁：环境、契约、鉴权、授权、请求上限、fixture 和清理能力。门禁未通过时只停止受影响步骤，将用例标记 `not_run` 并保存原因。
 9. 当前范围门禁满足后，可信宿主调用 `execute_test_package(..., runtime_values=values)`；宿主在内存中构造 RuntimeContext 2.0 并调用 `run_pipeline(...)`，按 DAG 执行请求、变量提取、断言、数据准备和 teardown。
@@ -173,6 +173,7 @@ TestPackage 中每条可执行用例至少声明：
 - `config_status` 和画像 lifecycle/revision/指纹由 L1 维护；本 skill 只输出 `runtime_status` 与结构化契约差异观察，认证/连接失败不得自动标为配置或画像漂移。
 - 凭据默认经宿主内存注入；允许固定 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 作为唯一的 Host-private ephemeral secret file 例外。该文件必须绑定运行、环境、包指纹与短 TTL，只含已声明 Secret binding，由可信宿主校验并删除后才构造 RuntimeContext；其他落盘方式仍禁止。生产/疑似生产隔离；写请求未知交付状态禁止自动重试。
 - 禁止创建、修改、修正或覆盖 `docs/interface-profile/*.md`。实际响应与画像不一致时，记录期望、实际、证据引用、候选分类和责任人，并交由主 Agent 调度 L1 复核；不得为了让用例通过而修改预期。
+- 画像治理块可选的 `facts:` 引用只做消费校验：`lifecycle=executable` 时每条必须 `confirmed` 且带 `confirmed_by`，否则以 `PROFILE_FACTS_UNCONFIRMED` 阻断；本 skill 不创建、不确认、不回写事实账本 `docs/scan-facts/ledger.jsonl`。
 - DB/Redis/审计未启用时记录 `not_enabled` 或覆盖缺口，不得记为通过。
 - 普通非生产写操作默认允许，但优先使用可验证 teardown；无法清理时必须进入结果和待处理对象清单，标记残留风险，不能将运行标记为完整通过。批量、destructive、生产/疑似生产和真实外部动作必须阻断或确认。
 - 清理失败必须进入结果和待处理清单；风险豁免必须标记为 `waived`/“已风险豁免”，不能称为清理通过，且有豁免或残留对象时最终 verdict 不得为 `passed`。
@@ -218,6 +219,7 @@ TestPackage 中每条可执行用例至少声明：
 - 可行性规划器：`scripts/feasibility_plan.py`（纯本地静态计算，不接触运行时值）
 - 测试包编译器：`scripts/package_compiler.py`（只接受已审核且可行性门禁通过的设计）
 - 确定性执行内核：`scripts/runner.py`（仅同进程 Python API）
+- DB Oracle 只读执行器：`scripts/db_oracle.py`（oracle 任务的 DB 核对；声明静态白名单 + 只读连接 + 断言复用 Runner 算子）
 - 可信宿主入口：`scripts/trusted_host.py`（接收内存运行值、构造 RuntimeContext 2.0、记录阶段耗时与安全阻断结果）
 - 流水线入口：`scripts/run_pipeline.py`（仅可信宿主传入 RuntimeContext 2.0；CLI fail-closed）
 - 运行时上下文：`scripts/runtime_context.py`

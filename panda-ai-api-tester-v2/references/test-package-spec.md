@@ -1,8 +1,8 @@
-# TestPackage 规范（2.2，兼容 2.1）
+# TestPackage 规范（2.3，兼容 2.2 / 2.1）
 
 ## 目的
 
-保存单次可执行测试计划，并显式绑定项目配置、接口画像、需求上下文、目标环境及已通过的静态可行性规划。新包使用 TestPackage 2.2；Runner 继续兼容已存在的 TestPackage 2.1，但 2.1 不得作为新建流程绕过 `GATE-FEASIBILITY`。项目配置仍只接受 Schema 2.1；不兼容旧版 `test-config.md`。
+保存单次可执行测试计划，并显式绑定项目配置、接口画像、需求上下文、目标环境及已通过的静态可行性规划。新包使用 TestPackage 2.3；Runner 继续兼容已存在的 TestPackage 2.2 / 2.1，但旧版本不得作为新建流程绕过 `GATE-FEASIBILITY`。项目配置仍只接受 Schema 2.1；不兼容旧版 `test-config.md`。
 
 生成顺序固定为：`REQUIREMENT → CASE DESIGN（候选用例）→ FEASIBILITY / DATA PLAN → HUMAN REVIEW → FINAL GATE-FEASIBILITY → PACKAGE BUILD → PROBE/EXECUTE`。详细可行性结构见 `feasibility-plan-spec.md`。
 
@@ -71,6 +71,43 @@ docs/
     "document_fingerprint": "sha256:<64 hex>",
     "contract_fingerprint": "sha256:<64 hex>"
   },
+  "contracts": [
+    {
+      "profile_path": "docs/interface-profile/route.md",
+      "governance_schema_version": "1.0",
+      "profile_id": "project:route",
+      "profile_revision": 3,
+      "code_baseline": "<commit-or-release>",
+      "lifecycle": "executable",
+      "document_fingerprint": "sha256:<64 hex>",
+      "contract_fingerprint": "sha256:<64 hex>",
+      "role": "trigger"
+    },
+    {
+      "profile_path": "docs/interface-profile/operation-log.md",
+      "governance_schema_version": "1.0",
+      "profile_id": "project:operation-log",
+      "profile_revision": 5,
+      "code_baseline": "<commit-or-release>",
+      "lifecycle": "executable",
+      "document_fingerprint": "sha256:<64 hex>",
+      "contract_fingerprint": "sha256:<64 hex>",
+      "role": "oracle",
+      "interface_ref": "scanOperationLog.pageList"
+    },
+    {
+      "profile_path": "docs/interface-profile/track.md",
+      "governance_schema_version": "1.0",
+      "profile_id": "project:track",
+      "profile_revision": 2,
+      "code_baseline": "<commit-or-release>",
+      "lifecycle": "executable",
+      "document_fingerprint": "sha256:<64 hex>",
+      "contract_fingerprint": "sha256:<64 hex>",
+      "role": "negative_oracle",
+      "interface_ref": "track.public.list"
+    }
+  ],
   "environment": {
     "environment_id": "uat",
     "production": false,
@@ -138,8 +175,10 @@ docs/
 
 ## 版本与可行性绑定
 
-- `schema_version=2.2`：新包标准；必须携带有效 `feasibility` 与 `package_build`，且 `review.approved_scope` 必须与 `feasibility.executable_case_ids` 完全一致。
+- `schema_version=2.3`：新包标准；支持 `contracts` 多契约绑定，必须携带有效 `feasibility` 与 `package_build`，且 `review.approved_scope` 必须与 `feasibility.executable_case_ids` 完全一致。`contract` 仍必须存在并等于 `role=trigger` 的那一条，作为单契约消费方（报告、PROMOTE、旧结果校验）的兼容视图。
+- `schema_version=2.2`：只兼容既有单契约可执行资产；报告标记为 legacy，不能声称已完成多接口契约治理。
 - `schema_version=2.1`：只兼容既有可执行资产；报告标记为 legacy，不能声称已经经过新的可行性规划。
+- `contracts` 缺省时，`contract` 按一条 `role=trigger` 绑定解释，行为与旧包完全一致；声明 `contracts` 时，每条绑定的 `profile_id/profile_revision/lifecycle/facts/双指纹` 均独立校验，任一不通过即整包阻断，不得只校验触发接口。
 - 数据规划允许存在 `blocked` 依赖并以 `pending_review` 状态完成；人工审核决定全量批准、批准依赖已闭合的子集、暂缓或要求补充。
 - 修改候选用例、批准范围或执行依赖后，必须重新生成 FeasibilityPlan；禁止手工修改嵌入快照或只更新指纹。
 - 最终 `GATE-FEASIBILITY` 在人工审核后、Package Build 前验证；批准范围仍含未闭合依赖时不得建包。已编译包仍在 RuntimeContext、Secret envelope 和 Runner 之前复核该快照，失败不得发送 HTTP。
@@ -167,6 +206,9 @@ Runner 在发送请求前必须：
 3. 重新计算画像的 `document_fingerprint`。计算前将治理块中的两个 fingerprint 值规范化为固定占位符，避免指纹自引用。
 4. 从画像治理块读取并核对 `contract_fingerprint`；该指纹由 L1 对规范化契约事实计算，Runner 不从自然语言正文重新推导业务语义。
 5. 任一身份字段、revision、生命周期或指纹不一致时阻断旧包并要求重新生成；包内自报 `executable` 不能覆盖画像生命周期。
+6. 读取治理块中可选的 `facts:` 引用。`lifecycle=executable` 时每条引用必须为 `confirmed` 且带 `confirmed_by`；候选事实、`needs_reviewer` 或未知状态一律阻断（`PROFILE_FACTS_UNCONFIRMED`）。画像未声明 `facts:` 时保持向后兼容，不额外阻断。
+
+`facts:` 是 L1 事实账本 `docs/scan-facts/ledger.jsonl` 的引用投影，不是第二份事实源：Runner 只校验状态是否已结算，不根据它推导业务语义，也不回写账本。
 
 纯排版/说明变化可以只更新 `document_fingerprint`，不会伪造契约语义变化，但会使绑定旧文档版本的运行包失效并要求重建，以保证运行证据可追溯。
 
@@ -180,6 +222,18 @@ Runner 在发送请求前必须：
 - `executable`：允许完整 EXECUTE、PROMOTE 和正式回归资产沉淀。
 
 使用 `minimally_usable` 或 `confirmed` 执行时，TestPackage 必须在 `known_gaps` 中披露未完成的 Owner、指纹、清理、外部边界或 Oracle，并将其绑定到具体 case/AC。不得把局部执行结果描述为完整需求通过；PROMOTE 仍只接受 `executable`。
+
+### 多契约角色
+
+`contracts` 中每条绑定声明 `role`，取值固定：
+
+- `trigger`：本包主动触发业务行为的主接口，有且仅有一条；
+- `oracle`：用于断言结果的查询接口，必须声明 `interface_ref`；
+- `negative_oracle`：用于断言不可见/不应出现的反证接口，必须声明 `interface_ref`。
+
+约束：角色化绑定不得重复（同一 `profile_id + role` 只出现一次）；Oracle 与 trigger 受同一套生命周期与事实门槛约束，不得因为“只是查询接口”降级校验；`fast_single_api`（`execution_profile=single_api_quality`）沿用既有放宽规则，但放宽同样逐条生效，不因主接口合格而豁免 Oracle。
+
+运行结果必须回写全部绑定：`result.json` 的 `contracts` 为数组，逐条记录 `role/interface_ref/profile_id/profile_revision/code_baseline/lifecycle/contract_fingerprint`；`contract` 保留为 trigger 视图，保证旧消费方与历史结果可比。证据归因不得把整次运行只记成主画像版本。
 
 ## 环境隔离与安全
 
@@ -252,6 +306,29 @@ Runner 在发送请求前必须：
 带凭据但未声明 `auth_probe` 的包不再一律阻断；执行器通过已审核业务请求观察认证结果：401/403 记为认证失败，已送达的其他业务结果记为认证已观察。若声明 `auth_probe`，`read_only_operations` 绑定为必填时，声明门禁的 `"<METHOD> <path>"` 必须出现在只读白名单中；否则 Runtime Preflight 阻断。`execution_control.formal_http_allowed=false` 与 `strategy=declared` 互斥。
 
 `validate_result.py` 要求 `verdict=passed` 的运行具有 `environment.runtime_status.auth=verified` 或 `declared_only`；其中 `verified` 可以来自 auth probe，也可以来自已审核业务请求的认证观察，`declared_only` 仅表示凭据存在且不应单独支撑完整通过。
+
+## DB Oracle（只读）
+
+统一 Run 中 DB 核对通过 `oracle` 类型任务声明（`oracle_type: "db"`），由 `scripts/db_oracle.py` 的 `db_task_executor` 经可信宿主注入执行。声明在编译期静态校验（`plan_compiler` 调用 `validate_db_oracle`），非法声明 fail-closed。
+
+声明字段：
+
+- `oracle_id`：稳定标识。
+- `kind: "db"`、`oracle_type: "db"`。
+- `binding`：`runtime_bindings` 中的连接串绑定名；连接串属于 Secret，只经 RuntimeContext 内存注入，不得写入包或证据。
+- `statement`：单条 `SELECT`；必须包含 `WHERE`，必须显式列字段（禁止 `SELECT *`），禁止注释、多语句、分号拼接及任何数据变更关键字（INSERT/UPDATE/DELETE/DDL/PRAGMA/ATTACH/INTO OUTFILE 等）。`${var}` 占位符在执行期以安全字面量替换（字符串自动加引号转义，未知变量报错）。
+- `max_rows`：1..500，默认 100；结果集超限记 `error`，不得静默截断。
+- `assertions`：`source` 仅允许 `row_count`、`scalar`、`row[<index>].<column>`；算子复用 Runner 词表，`row_count` 不得使用 `exists/all_present/contains`。
+
+执行语义：
+
+- 绑定缺失、驱动未安装（MySQL 需 pymysql、PostgreSQL 需 psycopg2）或连接失败 → `not_enabled`，属于覆盖缺口，不得记为通过；
+- 数据不符 → 断言 `failed`，计入用例事实；
+- 结果集超限或未知变量 → `error`；
+- SQLite 以 read-only URI 打开；驱动层即只读，任何写语句在声明层已被拒绝；
+- 证据写入 `evidence/oracle-<id>.json`，行数据按列名敏感级别掩码，Secret 值全局替换为 `[REDACTED]`。
+
+Redis、消息队列与日志/轨迹查询 Oracle 尚未内建执行器；声明存在但无对应执行能力时，任务不得被调度为可执行，结果保持 `not_run`/`not_enabled`，不得包装为通过。
 
 ## 用例要求
 

@@ -11,6 +11,13 @@ EXECUTION = {"not_run", "partial", "complete"}
 VERDICTS = {"passed", "failed", "blocked", "inconclusive", "not_run"}
 ISSUE_TYPES = {"defect", "test_gap"}
 SEVERITIES = {"blocker", "high", "medium", "low"}
+# Which immutable evidence kinds may support a passed verdict, per verifiability.
+PASS_EVIDENCE_KINDS = {
+    "direct": {"business_execution"},
+    "partial": {"business_execution", "external_evidence"},
+    "none": {"external_evidence"},
+}
+PATH_REQUIRED_KINDS = {"business_execution", "external_evidence"}
 
 TEMPLATE_ID = "panda-requirement-report"
 TEMPLATE_VERSION = "2.0.0"  # 2.0.0: 设计令牌与基础样式收敛到 panda-report-theme/report-base.css
@@ -97,8 +104,17 @@ def validate(data, base_dir=None):
             referenced = [immutable_runs[ref] for ref in refs if ref in immutable_runs]
             if not referenced:
                 errors.append(f"{prefix}: passed requires an immutable evidence run reference")
-            elif not any(run.get("kind") == "business_execution" for run in referenced):
-                errors.append(f"{prefix}: passed requires business_execution evidence")
+            else:
+                # A pass must be supported by the layers the AC actually claims.
+                verifiability = item.get("interface_verifiability") or "direct"
+                required = PASS_EVIDENCE_KINDS.get(verifiability, PASS_EVIDENCE_KINDS["direct"])
+                available = {run.get("kind") for run in referenced}
+                missing = required - available
+                if missing:
+                    errors.append(
+                        f"{prefix}: passed with interface_verifiability={verifiability} requires evidence kinds "
+                        f"{sorted(required)}; missing {'/'.join(sorted(missing))}"
+                    )
     total = requirement.get("acceptance_total")
     if isinstance(total, int) and total != len(items):
         errors.append("requirement.acceptance_total must equal acceptance_items length")
@@ -115,8 +131,8 @@ def validate(data, base_dir=None):
             errors.append(f"evidence_runs[{index}] requires id and immutable=true")
             continue
         path_value = run.get("result_path") or run.get("report_path")
-        if run.get("kind") == "business_execution" and not path_value:
-            errors.append(f"evidence_runs[{index}]: business_execution run requires result_path")
+        if run.get("kind") in PATH_REQUIRED_KINDS and not path_value:
+            errors.append(f"evidence_runs[{index}]: {run.get('kind')} run requires result_path")
         if path_value:
             resolved = _resolve_evidence(path_value, base_dir)
             if not resolved.is_file():
@@ -160,7 +176,9 @@ def render(data):
     item_rows = []
     for item in items:
         gaps = "；".join(item.get("gaps") or []) or "-"
-        evidence = "、".join(item.get("evidence_refs") or []) or "-"
+        evidence_refs = list(item.get("evidence_refs") or [])
+        evidence_refs += list((item.get("external_evidence") or {}).get("refs") or [])
+        evidence = "、".join(evidence_refs) or "-"
         issue_refs = "、".join(item.get("issue_refs") or []) or "-"
         item_rows.append(f'<tr data-state="{esc(item.get("execution_status"))}"><td><code>{esc(item.get("id"))}</code><strong>{esc(item.get("title"))}</strong></td><td>{badge(item.get("execution_status"))}</td><td>{badge(item.get("verdict"))}</td><td>{esc(item.get("actual") or "-")}</td><td>{esc(gaps)}</td><td><code>{esc(evidence)}</code></td><td><code>{esc(issue_refs)}</code></td></tr>')
     issue_cards = []

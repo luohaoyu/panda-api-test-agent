@@ -21,6 +21,12 @@ confirmation:
   confirmed_by: ${CONFIRMER_OR_PENDING}
   confirmed_at: ${ISO8601_WITH_TIMEZONE_OR_PENDING}
   scope: []
+facts:
+  - fact_id: ${FACT_ID_OR_PENDING}
+    status: candidate
+    decision_owner: ai_skill
+    confirmed_by: ${AI_OR_REVIEWER_OR_PENDING}
+    applies_to: [route, request_schema]
 fingerprints:
   document_fingerprint: sha256:${FULL_MARKDOWN_SHA256}
   contract_fingerprint: sha256:${CANONICAL_CONTRACT_SHA256}
@@ -36,6 +42,9 @@ fingerprints:
 - `document_fingerprint` 绑定完整 Markdown 文件，用于证据追溯；写入时计算指纹的治理块中两个 fingerprint 值必须先规范化为占位符，避免自引用。
 - `contract_fingerprint` 仅对规范化契约事实计算：路径、方法、鉴权、参数与约束、请求/响应 schema、成功/错误码、前置数据、副作用、清理、异步一致性；排序、空白和纯说明变化不得改变它。
 - Owner 缺失、关键事实仍为推断或目标环境安全性未确认时，完整画像保持 `drafted`、`drifted` 或 `reconfirm_required`；若当前目标所需最小事实已确认，可使用 `minimally_usable` 支持受控局部执行。
+- `facts` 只允许引用 `docs/scan-facts/ledger.jsonl` 中已登记的事实；`fact_id` 不得手写或编造。
+- `lifecycle=confirmed|executable` 时，`facts` 中每条事实必须为 `confirmed` 且带 `confirmed_by`；候选事实只能存在于 `discovered|drafted|minimally_usable`。执行侧 `runner` 会在读取画像时再次校验并拒绝 `PROFILE_FACTS_UNCONFIRMED`。
+- `decision_owner=reviewer` 的事实只能由责任人确认，AI 语义判断不能替代责任人结论。
 
 ## 接口清单（七字段，缺一不可）
 

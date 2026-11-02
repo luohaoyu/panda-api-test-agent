@@ -2,7 +2,7 @@
 name: panda-api-test-agent-v2
 description: Easy/Fast 的新需求与新功能接口验证主 Agent。面向“验证这个需求/新功能”“测试单个接口质量”“调试这个接口”“检查环境”四类入口，先识别入口与最小目标；需求验收项分类为 direct/partial/none，并明确 none 无法在接口层验证；单接口默认执行传统接口质量测试。AI 生成测试设计后必须进入 pending_review，只有人工 approved 或 partially_approved 的具体用例才允许执行。需要进行需求/功能接口验收、单接口质量测试或接口调试时使用。
 agent_created: true
-version: 2.5.0
+version: 2.6.1
 ---
 
 # API Test Agent
@@ -175,7 +175,7 @@ version: 2.5.0
 7. **请求人工审核并回写**：先用 `compile_and_create_run` 建立 `pending_review` Run（可执行审核在创建时就校验），再按「测试设计人工审核门」展示并收取决定，用 `record_review(run_dir, review)` 回写同一 Run；未获批准时不得推进执行。
 8. **执行分层门禁**：校验审核状态、审核范围、设计指纹、配置状态、当前用例需要的画像字段、授权范围、请求上限、数据标签和副作用；设计门禁失败时 fail-closed。
 9. **判断阶段**：配置或画像缺失时进入 L1 按需补齐；设计未审时停在 `pending_review`；设计已审且其他门禁满足后，才允许对应 `PROBE` 或 `EXECUTE`；生产、破坏性、批量、越权或目标对象不明时额外阻断并确认。
-10. **执行期调度**：调度 `panda-ai-api-tester-v2` 只执行获批用例。TestPackage 2.1 绑定配置 revision、environment ID、画像身份与 `environment.runtime_bindings`；可信宿主构造 RuntimeContext 2.0。运行值默认由宿主内存提供；认证 Secret 也可经固定路径 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 的一次性 local bridge 传递，Runner Adapter 校验并删除文件后才在内存中构造 RuntimeContext。旧字段、隐式环境读取或任意文件回退必须 fail-closed。
+10. **执行期调度**：调度 `panda-ai-api-tester-v2` 只执行获批用例。TestPackage 2.2/2.3 绑定配置 revision、environment ID、画像身份（需求级多接口场景为 `contracts` 的 trigger/oracle/negative_oracle 角色列表，每条独立校验 revision、生命周期与双指纹）与 `environment.runtime_bindings`；可信宿主构造 RuntimeContext 2.0。运行值默认由宿主内存提供；认证 Secret 也可经固定路径 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 的一次性 local bridge 传递，Runner Adapter 校验并删除文件后才在内存中构造 RuntimeContext。旧字段、隐式环境读取或任意文件回退必须 fail-closed。
 11. **过程交互**：设计变化时立即停止执行，将审核置为失效并重新进入 `pending_review`；其他情况下只在缺口、漂移、风险升级或失败时打扰用户。
 12. **执行阻断自诊断**：任何门禁、编译、绑定或运行准备异常都必须调用本地诊断器，输出结构化 `code/category/owner/severity/recoverable/evidence/impact/next_action`；不得只返回“门禁不通过”或静默等待用户追问。诊断必须区分技能/宿主故障、L1/运行资产缺口和用户决策缺口，并明确当前是否能跑、最多 3 个当前硬阻塞及唯一下一步。
 13. **安全自动恢复**：仅自动执行不改变审核语义、不读取 Secret、不猜测环境/夹具、不触发业务副作用的确定性动作，例如规范化诊断、计算指纹、构建 feasibility plan 和校验编排器参数。审批、凭据、测试数据、风险确认、环境绑定和高风险动作不得自动补写或放行。自动恢复失败必须保留原始阻断证据并再次输出诊断。
@@ -229,10 +229,11 @@ version: 2.5.0
 3. 只纳入已校验且通过设计审核的运行结果；外部造数运行可作为 fixture 证据，不计为 AC 通过。
 4. 为每条 AC 填写执行状态、验收结论、实际结果、缺口、证据和问题引用。`partial` 只有在完整需求 Oracle 闭合时才可判整条 AC 通过；`none` 不得由接口结果判通过。
 5. 将缺陷与测试缺口分别登记，禁止用证据不足或接口层不可验证推导产品缺陷。
-6. 用 `build_requirement_manifest_for_runs([run_dir...])` 生成唯一清单：AC 事实、缺陷和残留风险来自 `requirement_aggregation` 的 `current` 投影，不在主 Agent 侧另算一遍。单次运行需要清单时用 `build_requirement_manifest(run_dir)`。
-7. 运行 `python scripts/render_requirement_report.py <manifest> --output <report>`；报告器校验失败时不得交付正式报告。
-8. 报告总体结论与 `release_recommendation` 必须来自同一组 AC 事实（PASS / BLOCKED / FAIL / INCONCLUSIVE），不得用单次运行 verdict 直接替代，也不得出现“结论 INCONCLUSIVE 但建议可发布”的组合。
-9. 对外默认只展示需求级报告；按需提供运行级报告和原始 evidence。
+6. `partial/none` 需要外部验证层（UI、DB、MQ、审计、人工验收）才能闭合时，通过 `scripts/external_evidence.py::record_external_evidence` 结构化登记：`ac_id + layer + status + refs + provided_by`。**接口层事实只能来自 Run**，不得经此通道登记；`passed/failed` 必须带具体引用，口头“我看过了”不构成证据。
+7. 用 `build_requirement_manifest_for_runs([run_dir...], store_root=...)` 生成唯一清单：AC 事实、缺陷和残留风险来自 `requirement_aggregation` 的 `current` 投影，外部证据按 AC 合并后参与结论，不在主 Agent 侧另算一遍。单次运行需要清单时用 `build_requirement_manifest(run_dir)`。
+8. 登记或补充证据后必须调用 `refresh_requirement_report(...)` 重算并渲染唯一 `current` 报告；不要手工拼接 HTML，也不要只更新内存结论而不落盘。
+9. 报告器校验失败时不得交付正式报告。报告总体结论与 `release_recommendation` 必须来自同一组 AC 事实（PASS / BLOCKED / FAIL / INCONCLUSIVE），不得用单次运行 verdict 直接替代，也不得出现“结论 INCONCLUSIVE 但建议可发布”的组合。
+10. 对外默认只展示需求级报告；按需提供运行级报告和原始 evidence。
 
 ## 典型流程示例
 
@@ -245,6 +246,7 @@ version: 2.5.0
 - 展示用例、请求摘要、断言、数据依赖和副作用，状态置为 `pending_review`。
 - 仅在用户对具体用例给出 `approved` 或 `partially_approved` 后执行获批范围。
 - 汇总接口层事实；不得把 `partial` 的局部通过或 `none` 包装成需求完整通过。
+- `partial/none` 的 AC 在接口层之外还需要 UI、DB、消息、审计或人工验收时，明确告诉用户“还差哪一层、需要什么形式的证据”，收到后登记外部证据并重算报告；未收到时保持 `inconclusive` 并说明缺口，不催、不猜、不代填。
 
 ### 单接口质量测试
 
@@ -286,10 +288,11 @@ version: 2.5.0
 - `entry_state.py`：入口状态 envelope 与审核状态词表；只做规范化与校验，运行状态由 L2 `run_state` 持久化。
 - `requirement_validation.py`：AC 的 `direct/partial/none` 结构化与 `none` 不生成 API 用例的不变量。
 - `review_adapter.py`：审核契约的**唯一**规范化入口（别名映射见「审核契约」表）。
-- `run_orchestrator.py`：`compile_and_create_run` / `record_review` / `next_action` / `execute_slice` 调度 / `reduce_run` / `build_requirement_manifest` / `build_requirement_manifest_for_runs`。
+- `run_orchestrator.py`：`compile_and_create_run` / `record_review` / `next_action` / `execute_slice` 调度 / `reduce_run` / `build_requirement_manifest` / `build_requirement_manifest_for_runs` / `refresh_requirement_report`。
 - `requirement_aggregation.py`：多 Run 的 `current` 聚合（账本重算、缺陷去重、残留风险）。
+- `external_evidence.py`：`partial/none` 的外部验证层证据登记（append-only、禁止接口层伪造、无引用不得判通过）。
 - `execution_diagnostics.py`：门禁/编译/绑定异常的本地结构化自诊断。
-- `protocol_contract.py`：跨技能 artifact 契约与用户决策记录。
+- `protocol_contract.py`：跨技能 artifact 契约、用户决策记录，以及 L1 事实（`scan_fact` / `scan_fact_decision`）的归一化与"必须已确认"校验。
 - `render_requirement_report.py`：需求级确定性报告器。
 
 规范：

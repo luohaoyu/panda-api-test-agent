@@ -99,3 +99,32 @@
 - 部署：Docker、Compose、CI/CD、Helm/Kubernetes（若存在）。
 
 模式只是入口；未命中必须形成结构化缺口，不得用默认值补齐。
+
+## 8. 事实账本与确认链路
+
+扫描候选进入画像前必须经过账本，避免"扫描命中即事实"的隐性升级。
+
+```text
+scan_report
+  → scripts/scan_facts.py ingest            # 候选事实写入 docs/scan-facts/ledger.jsonl
+  → AI 语义裁决（confirmed / rejected / needs_reviewer）
+  → 责任人确认（仅 decision_owner=reviewer 的事实）
+  → 画像治理块 facts:
+  → asset_validator / runner 消费前校验
+```
+
+| 事实类型 | 来源 | 主语 | 账本状态 | 默认决策方 |
+|---|---|---|---|---|
+| `source` | 源码路由扫描 | method + path | `candidate` | AI 判断是否属于当前目标接口 |
+| `contracts` | OpenAPI/源码契约合并 | method + path | `candidate` | AI 判断契约事实，责任人确认业务语义 |
+| `deployment` | 部署配置、变量名 | service | `candidate` | 环境负责人确认可达性 |
+
+规则：
+
+- `fact_id` 由 `project_id + fact_type + subject + claim` 稳定派生；重复扫描同一事实不产生新 id，语义变化才产生新 id，可用于漂移比对。
+- `ingest` 幂等：已存在的 `fact_id` 不会重复写入，也不会被覆盖。
+- 决策只追加：`confirmed`、`rejected`、`needs_reviewer`、`superseded` 都是新记录，历史保留。
+- `confirmed` 必须附 `evidence_refs`；`rejected`/`superseded` 必须附理由；被拒绝事实不可翻案，只能基于新观察产生新事实。
+- `decision_owner=reviewer` 的事实不允许 AI 确认；`needs_reviewer` 表示待责任人裁决，不等于通过。
+- 画像 `lifecycle=confirmed|executable` 时，`facts:` 引用必须全部 `confirmed`，否则 L1 校验与执行侧都会 fail-closed。
+- 账本损坏或被截断时立即报错，不静默降级为"无事实"。

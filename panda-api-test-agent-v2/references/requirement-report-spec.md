@@ -9,7 +9,9 @@
 清单来源固定为 `scripts/run_orchestrator.py` 的两个投影函数，不允许手工编写：
 
 - `build_requirement_manifest(run_dir)`：单个已归约 Run 的投影，用于运行级清单。
-- `build_requirement_manifest_for_runs([run_dir...])`：多 Run 的 `current` 投影，`report_id` 固定为 `AR-<requirement-id>-CURRENT`，内部消费 `requirement_aggregation` 的 `current_cases`/`defects`/`residual_risks`，不在主 Agent 侧重算。
+- `build_requirement_manifest_for_runs([run_dir...], store_root=...)`：多 Run 的 `current` 投影，`report_id` 固定为 `AR-<requirement-id>-CURRENT`，内部消费 `requirement_aggregation` 的 `current_cases`/`defects`/`residual_risks` 和 `external_evidence` 的外部证据汇总，不在主 Agent 侧重算。
+
+正式报告的发布入口只有 `refresh_requirement_report(...)`：重建清单 → 报告器校验 → 落盘 JSON → 渲染 HTML → 校验发布建议与结论一致。禁止绕过该函数手工更新报告。
 
 `release_recommendation` 必须与报告总体结论由同一组 AC 事实推导，禁止用单次运行 verdict 直接替代；两者不一致的清单视为无效。
 
@@ -17,6 +19,7 @@
 
 ```text
 .panda-api-test-agent/requirements/<requirement-id>/requirement-report.json
+.panda-api-test-agent/requirements/<requirement-id>/external-evidence.jsonl
 .panda-api-test-agent/reports/<requirement-id>-acceptance-current.html
 ```
 
@@ -94,12 +97,47 @@
 
 - `execution_status=complete` 只表示声明范围内验收步骤与 Oracle 完整，不代表通过。
 - `verdict=passed` 必须同时满足 `execution_status=complete` 且所有必需预期成立。
-- `partial` 的接口部分通过默认只能形成局部事实；除非其他验证层证据同时闭合整条 AC，否则整条 AC 不得标记 `passed`。
+- `partial` 的接口部分通过默认只能形成局部事实；除非其他验证层证据（经 `external_evidence.py` 登记）同时闭合整条 AC，否则整条 AC 不得标记 `passed`。
 - `none` 不得由接口运行判定 `passed` 或 `failed`；保持 `not_run`/`inconclusive`，并提供建议验证层。
 - 部分证据不得写为通过；环境门禁、鉴权、造数和 collect 不计入验收项通过。
 - 未发送业务请求或无运行证据的项必须为 `not_run`。
 
-## 5. 三类覆盖率
+## 5. 外部验证层证据登记
+
+`partial` 和 `none` 的外部事实只能经 `scripts/external_evidence.py` 登记，不允许在对话里口头确认后直接改写报告结论。
+
+```text
+record_external_evidence(store_root, requirement_id, ac_id,
+    layer=ui|client|db|mq|cache|audit|log|trace|manual|security|performance|compatibility,
+    status=passed|failed|blocked,
+    refs=[...], provided_by=<谁提供的证据>, note=..., recorded_at=...)
+```
+
+规则：
+
+- 账本 append-only：`requirements/<id>/external-evidence.jsonl`，一条记录一行，历史不覆盖；同一 `ac_id + layer` 的新登记通过 `supersedes` 取代旧记录，旧记录保留可追溯。
+- **禁止登记 API 层事实**：`layer` 为 `api`/`http`/`run`/`business_execution` 直接拒绝。接口层事实只能由不可变 Run 结果产生，否则任何口头结论都能伪装成证据。
+- `passed` / `failed` 必须至少带一条 `refs`；`blocked` 可无引用但必须说明原因。没有引用的“我看过了”不构成证据。
+- `ac_id` 必须存在于该需求的验收项中；孤儿证据直接报错，不允许静默失效。
+- 按 AC + layer 归并：任一层 `failed` → 该 AC 外部证据判 `failed`；已登记层全部 `passed` → `passed`；仅 `blocked` 或部分层缺失 → `blocked`/`missing`。
+- 登记后必须调用 `refresh_requirement_report` 重算并重新渲染，不允许只改内存结论。
+
+AC 结论矩阵：
+
+| interface_verifiability | 接口层 | 外部证据 | 结论 |
+|---|---|---|---|
+| `direct` | passed 且证据闭合 | 无 | `passed` |
+| `direct` | passed | `failed` | `failed`（证据冲突必须暴露，不得静默忽略） |
+| `partial` | passed 且证据闭合 | `passed` | `passed` |
+| `partial` | passed 且证据闭合 | 缺失 | `inconclusive`，`execution_status=partial` |
+| `partial` | passed 且证据闭合 | `failed` | `failed` |
+| `partial` | 未执行 | 任意 | `not_run`（外部证据不能替代接口验证） |
+| `none` | 不适用 | `passed` | `passed` |
+| `none` | 不适用 | 缺失 | `not_run`，`actual=接口层不可验证` |
+
+报告器额外校验通过证据的类型必须匹配可验证性：`direct` 必须引用 `business_execution`，`partial` 必须同时引用 `business_execution` 与 `external_evidence`，`none` 只接受 `external_evidence`。类型不匹配的清单判为不可渲染。
+
+## 6. 三类覆盖率
 
 以 `requirement.acceptance_total` 为统一分母：
 
@@ -109,7 +147,7 @@
 
 报告器负责计算，清单不得手工提供百分比。显示百分比时保留一位小数，同时显示分子/分母。
 
-## 6. 问题模型
+## 7. 问题模型
 
 `issues` 中每项必须声明：
 
@@ -122,21 +160,23 @@
 
 证据不足、缺账号、缺查询入口和未测 SLA 属于 `test_gap`，不得包装成产品缺陷。只有环境、数据和用例有效且产品行为违反预期时才登记 `defect`。
 
-## 7. 证据索引
+## 8. 证据索引
 
 `evidence_runs` 每项至少包含：
 
 - `id`：运行 ID 或外部造数运行 ID。
-- `kind`：`gate`、`data_discovery`、`fixture`、`business_execution`、`oracle`。
+- `kind`：`gate`、`data_discovery`、`fixture`、`business_execution`、`oracle`、`external_evidence`。
 - `result_path` 或 `report_path`。
 - `summary`。
 - `immutable: true`。
 
+`kind=external_evidence` 指向需求级外部证据账本（`external-evidence.jsonl`），其 `id` 为登记记录自身的 `evidence_id`（`EXT-*`），不经由运行生成，也不得改写。
+
 需求报告只做索引。认证头、令牌、密码及未脱敏响应不得进入清单或报告。
 
-报告器在渲染前校验证据引用：`evidence_runs` 声明了 `result_path` / `report_path` 时，对应文件必须存在（相对路径自 manifest 目录逐级向上解析）；`kind=business_execution` 的运行必须声明 `result_path`，且该文件应能通过 `panda-ai-api-tester-v2` 的 `validate_result.py`。无法通过校验的运行只能标记 `result_source=manual` 并降级为参考证据，不得支撑任何 `passed` 结论。
+报告器在渲染前校验证据引用：`evidence_runs` 声明了 `result_path` / `report_path` 时，对应文件必须存在（相对路径自 manifest 目录逐级向上解析）；`kind=business_execution` 与 `kind=external_evidence` 的运行必须声明 `result_path`，且该文件应能通过 `panda-ai-api-tester-v2` 的 `validate_result.py`（外部证据账本按其自身格式校验）。无法通过校验的运行只能标记 `result_source=manual` 并降级为参考证据，不得支撑任何 `passed` 结论。
 
-## 8. 总体结论
+## 9. 总体结论
 
 报告器按以下优先级计算：
 
@@ -147,7 +187,7 @@
 
 不得仅依据某次运行的 verdict 直接代替需求级结论。
 
-## 9. 确定性契约
+## 10. 确定性契约
 
 正式报告必须是 manifest 的纯函数产物：同一份 `requirement-report.json` 在任何时间、任何机器、任何时区、任何换行习惯下渲染出的字节完全一致。做不到这一点的产物只能算草稿，不得作为验收证据引用。
 

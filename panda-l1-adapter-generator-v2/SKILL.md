@@ -2,7 +2,7 @@
 name: panda-l1-adapter-generator-v2
 description: 扫描代码、部署与配置资产，创建或增量维护项目级多环境 test-config Schema 2.1 和接口画像。当用户要求接入新工程、重建项目测试配置、增加环境或复核配置漂移时使用。；v2 架构升级版
 agent_created: true
-version: 2.0.1
+version: 2.1.0
 ---
 
 # L1 适配层生成器
@@ -81,6 +81,18 @@ version: 2.0.1
 - 用户针对单个接口已提供可执行 curl 时，直接以 curl 作为当前接口输入，不要求先完成项目扫描；仅在缺少必要事实时由 AI 补做局部理解、局部扫描或询问。不得为了调用脚本而扩大扫描范围。
 - 扫描结果可以支持配置和画像草稿，但画像生命周期、运行风险和阶段决策仍按各自责任模型独立处理，不得从扫描报告推导全局放行或阻断。
 
+## 事实账本与两级确认
+
+扫描候选必须能回答"这条画像事实依据哪条 `fact_id`、由谁确认"。写入画像前按以下顺序处理，不允许跳过账本直接写结论：
+
+1. **登记候选**：`python scripts/scan_facts.py ingest <project_root> <scan.json> --project-id <id> [--baseline <ref>]`，把扫描发现写入 append-only 账本 `docs/scan-facts/ledger.jsonl`。`fact_id` 由 `project_id + 事实类型 + 主语 + 断言` 稳定派生：同一事实重复扫描不产生新 id，语义变化才产生新 id，可作为漂移判定锚点。
+2. **AI 语义裁决**：AI 结合代码、契约、部署和当前目标，对候选事实给出 `confirmed` / `rejected` / `needs_reviewer`，必须附 `evidence_refs`（文件行号、契约位置、运行时观察）。
+3. **责任人确认**：`decision_owner=reviewer` 的事实只能由 `--actor-type reviewer` 确认，AI 不得代替；`needs_reviewer` 表示等待责任人裁决，不等于默认通过。
+4. **写入画像治理块**：用 `scan_facts.governance_refs(...)` 生成 `facts:` 列表写入画像治理块，记录 `fact_id`、`status`、`decision_owner`、`confirmed_by`、`applies_to`。
+5. **消费前置校验**：画像 `lifecycle=confirmed|executable` 时，`facts:` 中每条事实必须是 `confirmed`，否则 `asset_validator` 与执行侧 `runner` 都会 fail-closed（`PROFILE_FACTS_UNCONFIRMED`）。
+
+账本只追加、不覆盖：修正靠新的 decision 记录，取代靠 `superseded` + `superseded_by`，被拒绝的事实不允许翻案，只能基于新观察产生新事实。账本损坏时立即报错，不静默降级。
+
 ## 配置边界
 
 `test-config.md` 可以保存：
@@ -131,6 +143,7 @@ version: 2.0.1
 - 配置包含 Owner、`config_revision`、资源级状态和安全规则。
 - 每个画像包含唯一治理块、Owner、`profile_revision`、代码基线、确认记录、生命周期、副作用/清理边界、`document_fingerprint` 和 `contract_fingerprint`。
 - 敏感字段全部为变量引用。
+- 画像治理块涉及的 `fact_id` 已登记，且进入 `confirmed`/`executable` 前全部为 `confirmed`。
 - 缺口已结构化和分层。
 - 结果明确为草稿或增量维护结果，不宣称测试已通过。
 
@@ -139,3 +152,4 @@ version: 2.0.1
 - 项目配置模板：`references/config-template.md`
 - 扫描映射：`references/scan-mapping.md`
 - 接口画像模板：`references/profile-template.md`
+- 事实账本：`scripts/scan_facts.py`（候选登记、两级确认、治理引用渲染）

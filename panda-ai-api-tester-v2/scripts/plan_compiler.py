@@ -15,6 +15,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from db_oracle import DbOracleError, declaration_from_task, validate_db_oracle
+
 
 class PlanCompileError(ValueError):
     """Raised when an intent cannot be compiled safely."""
@@ -248,6 +250,16 @@ def _validate_task(task: dict[str, Any], mode: str, known_ids: set[str]) -> dict
         raise PlanCompileError(f"fixture task {task_id} requires fixture_name, fixture, or action")
     if task_type == "oracle" and not (task.get("oracle_type") or task.get("oracle") or task.get("verification")):
         raise PlanCompileError(f"oracle task {task_id} requires oracle_type, oracle, or verification")
+    if task_type == "oracle":
+        declaration = declaration_from_task(task)
+        # Only executable DB oracle declarations (with a statement) are statically
+        # validated here; free-form verification blobs stay with the injected
+        # task executor and cannot run through the built-in db executor.
+        if declaration is not None and declaration.get("statement"):
+            try:
+                validate_db_oracle(declaration)
+            except DbOracleError as exc:
+                raise PlanCompileError(f"oracle task {task_id}: {exc}") from exc
     if task_type == "cleanup" and not (task.get("object_ref") or task.get("cleanup") or task.get("action")):
         raise PlanCompileError(f"cleanup task {task_id} requires object_ref, cleanup, or action")
     task["evidence_kind"] = {

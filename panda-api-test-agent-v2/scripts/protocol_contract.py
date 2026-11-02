@@ -21,9 +21,14 @@ ARTIFACT_SCHEMAS = {
     "test_result": "1.1",
     "requirement_report": "1.0",
     "scan_report": "1.0",
+    "scan_fact": "1.0",
+    "scan_fact_decision": "1.0",
     "user_decision": "1.0",
 }
 REVIEW_STATUSES = {"pending_review", "approved", "partially_approved", "rejected", "plan_only", "expired", "superseded"}
+FACT_STATUSES = {"candidate", "confirmed", "rejected", "needs_reviewer", "superseded"}
+FACT_DECISION_STATUSES = {"confirmed", "rejected", "needs_reviewer", "superseded"}
+FACT_DECISION_OWNERS = {"ai_skill", "reviewer"}
 
 
 def _canonical(value: Any) -> str:
@@ -115,9 +120,13 @@ def build_user_decision(review: dict[str, Any], *, plan_id: str, plan_fingerprin
 
 
 def normalize_scan_fact(fact: dict[str, Any], *, scan_id: str, baseline: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Normalize one L1 candidate fact. Confirmation is never implied here."""
     if not isinstance(fact, dict):
         raise ValueError("scan fact must be an object")
     result = copy.deepcopy(fact)
+    result.setdefault("protocol_version", PROTOCOL_VERSION)
+    result.setdefault("artifact_type", "scan_fact")
+    result.setdefault("schema_version", ARTIFACT_SCHEMAS["scan_fact"])
     result.setdefault("fact_id", f"FACT-{_hash({'scan_id': scan_id, 'fact': result})[7:23]}")
     result.setdefault("candidate_only", True)
     result.setdefault("semantic_decision_owner", "ai_skill")
@@ -125,6 +134,69 @@ def normalize_scan_fact(fact: dict[str, Any], *, scan_id: str, baseline: dict[st
     result.setdefault("scan_id", scan_id)
     result.setdefault("baseline", copy.deepcopy(baseline or {}))
     return result
+
+
+def normalize_fact_decision(decision: dict[str, Any], *, fact_id: str, fact_owner: str = "ai_skill") -> dict[str, Any]:
+    """Canonicalize an AI/reviewer decision about a scan fact.
+
+    Keeps the two-level responsibility model explicit: an AI decision can never
+    settle a fact whose accountable owner is a human reviewer.
+    """
+    if not isinstance(decision, dict):
+        raise ValueError("fact decision must be an object")
+    status = decision.get("status")
+    if status not in FACT_DECISION_STATUSES:
+        raise ValueError(f"unsupported fact decision status: {status!r}")
+    actor_type = decision.get("actor_type")
+    if actor_type not in {"ai", "reviewer"}:
+        raise ValueError(f"unsupported actor_type: {actor_type!r}")
+    actor_id = decision.get("actor_id")
+    if not actor_id:
+        raise ValueError("actor_id is required")
+    owner = decision.get("decision_owner") or ("reviewer" if actor_type == "reviewer" else "ai_skill")
+    if owner not in FACT_DECISION_OWNERS:
+        raise ValueError(f"unsupported decision_owner: {owner!r}")
+    refs = [item.strip() for item in decision.get("evidence_refs") or [] if isinstance(item, str) and item.strip()]
+    if status == "confirmed":
+        if not refs:
+            raise ValueError("confirmed fact decision requires evidence_refs")
+        if fact_owner == "reviewer" and actor_type != "reviewer":
+            raise ValueError("reviewer-owned fact cannot be confirmed by ai")
+        if owner == "reviewer" and actor_type != "reviewer":
+            raise ValueError("reviewer-owned fact cannot be confirmed by ai")
+    if status in {"rejected", "superseded"} and not (decision.get("rationale") or decision.get("superseded_by")):
+        raise ValueError(f"{status} fact decision requires rationale or superseded_by")
+    if status == "superseded" and not decision.get("superseded_by"):
+        raise ValueError("superseded fact decision requires superseded_by")
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "artifact_type": "scan_fact_decision",
+        "schema_version": ARTIFACT_SCHEMAS["scan_fact_decision"],
+        "fact_id": fact_id,
+        "status": status,
+        "decision_owner": owner,
+        "actor_type": actor_type,
+        "actor_id": actor_id,
+        "evidence_refs": refs,
+        "rationale": decision.get("rationale"),
+        "superseded_by": decision.get("superseded_by"),
+        "decided_at": decision.get("decided_at") or datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+    }
+
+
+def require_confirmed_facts(refs: list[dict[str, Any]], *, context: str = "artifact") -> list[str]:
+    """Return offending refs; callers fail closed when the list is not empty."""
+    errors = []
+    for ref in refs or []:
+        if not isinstance(ref, dict):
+            errors.append(f"{context}: fact ref must be an object")
+            continue
+        status = ref.get("status")
+        if status not in FACT_STATUSES:
+            errors.append(f"{context}: fact {ref.get('fact_id')} has unsupported status {status!r}")
+        elif status != "confirmed":
+            errors.append(f"{context}: fact {ref.get('fact_id')} is {status}, confirmed is required")
+    return errors
 
 
 def result_verdict_to_requirement_status(verdict: str, *, api_verifiability: str = "direct", external_evidence_status: str = "complete") -> str:

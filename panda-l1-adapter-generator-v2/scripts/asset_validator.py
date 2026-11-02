@@ -74,6 +74,68 @@ def _normalize_profile(text: str) -> str:
     )
 
 
+FACT_STATUSES = {"candidate", "confirmed", "rejected", "needs_reviewer", "superseded"}
+EXECUTABLE_LIFECYCLES = {"confirmed", "executable"}
+
+
+def parse_fact_refs(body: str) -> list[dict[str, Any]]:
+    """Parse the optional ``facts:`` list inside the governance block.
+
+    The governance block is a YAML subset by design; this parser therefore only
+    accepts the documented shape instead of pulling in a YAML dependency.
+    """
+    lines = body.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if re.match(r"^facts:\s*(?:#.*)?$", line):
+            start = index
+            break
+    if start is None:
+        return []
+    refs: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for line in lines[start + 1 :]:
+        if not line.strip():
+            continue
+        if not line.startswith((" ", "\t")):
+            break
+        item = re.match(r"^\s*-\s+([A-Za-z_]+):\s*(.*)$", line)
+        if item:
+            current = {item.group(1): item.group(2).strip()}
+            refs.append(current)
+            continue
+        field = re.match(r"^\s+([A-Za-z_]+):\s*(.*)$", line)
+        if field and current is not None:
+            current[field.group(1)] = field.group(2).strip()
+    return refs
+
+
+def _validate_fact_refs(body: str, lifecycle: str | None, errors: list[str]) -> list[str]:
+    refs = parse_fact_refs(body)
+    if not refs:
+        return []
+    seen: set[str] = set()
+    for index, ref in enumerate(refs):
+        fact_id = (ref.get("fact_id") or "").strip()
+        if not fact_id:
+            errors.append(f"governance.facts[{index}] requires fact_id")
+            continue
+        if fact_id in seen:
+            errors.append(f"governance.facts contains duplicate fact_id: {fact_id}")
+        seen.add(fact_id)
+        status = (ref.get("status") or "").strip()
+        if status not in FACT_STATUSES:
+            errors.append(f"governance.facts[{fact_id}] has unsupported status: {status or 'missing'}")
+        if status == "confirmed" and not (ref.get("confirmed_by") or "").strip():
+            errors.append(f"governance.facts[{fact_id}] confirmed status requires confirmed_by")
+        if lifecycle in EXECUTABLE_LIFECYCLES and status != "confirmed":
+            errors.append(
+                f"governance.facts[{fact_id}] must be confirmed before lifecycle={lifecycle}; "
+                "candidate facts cannot support executable contract facts"
+            )
+    return [ref.get("fact_id") for ref in refs if ref.get("fact_id")]
+
+
 def validate_profile(text: str) -> dict[str, Any]:
     blocks = list(PROFILE_BLOCK.finditer(text))
     if len(blocks) != 1:
@@ -94,6 +156,7 @@ def validate_profile(text: str) -> dict[str, Any]:
         errors.append(f"unsupported lifecycle: {lifecycle}")
     if not re.search(r"(?ms)^owners:\s*\n(?:^[ \t]+[^\n]+\n?)+", body):
         errors.append("governance.owners is required")
+    fact_ids = _validate_fact_refs(body, lifecycle, errors)
     normalized = _normalize_profile(text)
     document_fingerprint = _scalar(body, "document_fingerprint")
     actual = "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
@@ -108,6 +171,7 @@ def validate_profile(text: str) -> dict[str, Any]:
         "profile_revision": int(revision),
         "lifecycle": lifecycle,
         "document_fingerprint": actual,
+        "fact_ids": fact_ids,
     }
 
 
