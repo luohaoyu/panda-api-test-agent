@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Trusted host for RuntimeContext 2.0 API test execution.
 
-The caller either supplies non-secret runtime values directly or selects the
-single-use project-local runtime envelope for the current run. The envelope is
-the only file-backed credential channel; arbitrary files, process environment,
-argv and stdin remain forbidden. Persisted outcomes contain binding names only.
+The host resolves stable non-secret values from canonical test-config.md,
+persistent environment Secrets from the fixed project-local Store, optional
+single-use run Secret overrides, and explicit non-secret caller overrides.
+Arbitrary files, process environment, argv and stdin remain forbidden.
+Persisted outcomes contain binding names only.
 """
 from datetime import datetime, timezone
 import json
@@ -12,10 +13,12 @@ from pathlib import Path
 import time
 import uuid
 
+from environment_secret_store import EnvironmentSecretStoreError
 from plan_fingerprint import calculate_plan_fingerprint
 from run_pipeline import PipelineBlocked, run_pipeline
 from runtime_context import RuntimeContextError, build_runtime_context, package_execution_preflight
 from runtime_secret_bridge import LocalSecretBridgeError, consume_local_runtime_envelope
+from runtime_value_resolver import RuntimeValueResolutionError, resolve_runtime_values
 
 
 class RuntimeRequestOverrideError(ValueError):
@@ -102,18 +105,19 @@ def execute_test_package(
 ):
     """Execute one package through the trusted host.
 
-    Non-secret runtime_values stay in memory. When local_secret_run_id is set,
-    the host consumes the fixed project-local envelope for that run, deletes it,
-    merges only its declared secret bindings and then constructs RuntimeContext.
-    Returned and persisted outcomes contain binding names only.
+    Package execution preflight always runs before Secret access. The resolver
+    loads canonical non-secret config values and persistent environment Secrets;
+    an optional run envelope overrides persistent Secrets, and explicit host
+    runtime_values override canonical values when no run-envelope collision exists. Caller mappings are
+    copied and never mutated. Returned outcomes contain binding names only.
     """
     if runtime_values is _RUNTIME_VALUES_UNSET:
-        if local_secret_run_id is None:
-            raise ValueError("runtime_values or local_secret_run_id is required")
         runtime_values = {}
     elif runtime_values is None:
         raise ValueError("runtime_values must be an explicit mapping when provided")
     elif not isinstance(runtime_values, dict):
+        runtime_values = dict(runtime_values)
+    else:
         runtime_values = dict(runtime_values)
 
     host_started = time.perf_counter()
@@ -149,18 +153,13 @@ def execute_test_package(
 
         stage = "local_secret_consume"
         stage_started = time.perf_counter()
+        secret_values = {}
         if local_secret_run_id is not None:
             secret_values = consume_local_runtime_envelope(
                 package_file,
                 package,
                 local_secret_run_id,
             )
-            collisions = sorted(set(runtime_values) & set(secret_values))
-            if collisions:
-                raise LocalSecretBridgeError(
-                    "local runtime envelope bindings must not also be supplied in memory: " + ", ".join(collisions)
-                )
-            runtime_values.update(secret_values)
             stages[stage] = {
                 "status": "completed",
                 "duration_ms": _duration_ms(stage_started),
@@ -176,6 +175,20 @@ def execute_test_package(
                 "duration_ms": _duration_ms(stage_started),
                 "details": {"values_persisted": False},
             }
+
+        stage = "runtime_value_resolution"
+        stage_started = time.perf_counter()
+        runtime_values = resolve_runtime_values(
+            package_file,
+            package,
+            runtime_values=runtime_values,
+            run_secret_values=secret_values,
+        )
+        stages[stage] = {
+            "status": "completed",
+            "duration_ms": _duration_ms(stage_started),
+            "details": {"resolved_bindings": sorted(runtime_values)},
+        }
 
         stage = "runtime_preflight"
         stage_started = time.perf_counter()
@@ -216,7 +229,14 @@ def execute_test_package(
             "runtime_context": context_metadata,
             "artifacts": artifacts,
         }
-    except (RuntimeContextError, PipelineBlocked, RuntimeRequestOverrideError, LocalSecretBridgeError) as exc:
+    except (
+        RuntimeContextError,
+        PipelineBlocked,
+        RuntimeRequestOverrideError,
+        LocalSecretBridgeError,
+        EnvironmentSecretStoreError,
+        RuntimeValueResolutionError,
+    ) as exc:
         stages[stage] = {"status": "blocked", "duration_ms": _duration_ms(stage_started)}
         outcome = {
             "schema_version": "1.0",

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,15 @@ _TERMINAL_NON_EXECUTABLE = {"rejected", "plan_only", "expired", "superseded"}
 _EXECUTABLE = {"approved", "partially_approved"}
 _REVIEWED_AT_ALIASES = ("approved_at", "reviewed_at", "decided_at")
 _FINGERPRINT_ALIASES = ("plan_fingerprint", "design_fingerprint", "source_design_fingerprint")
+
+def _parse_time(value: Any):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else None
 
 
 def _case_ids(package: dict[str, Any] | None) -> list[str]:
@@ -171,6 +181,8 @@ def canonical_review(
     canonical["design_fingerprint"] = review.get("design_fingerprint") or fingerprint
     canonical["fingerprint_source"] = fp_key
     canonical["reviewed_fields"] = fields
+    if not canonical.get("reviewer") and canonical.get("reviewer_id"):
+        canonical["reviewer"] = canonical["reviewer_id"]
 
     errors: list[dict[str, str]] = []
     executable = status in _EXECUTABLE
@@ -194,6 +206,13 @@ def canonical_review(
             errors.append(_issue("REVIEW_TIME_REQUIRED", "review needs reviewed_at, approved_at or decided_at (ISO8601 with timezone)"))
         if not fingerprint:
             errors.append(_issue("FINGERPRINT_REQUIRED", "review needs plan_fingerprint or design_fingerprint"))
+        expires_at = canonical.get("expires_at")
+        if expires_at:
+            expires = _parse_time(expires_at)
+            if not expires:
+                errors.append(_issue("REVIEW_EXPIRY_INVALID", "review.expires_at must be an ISO8601 datetime with timezone"))
+            elif expires <= datetime.now(timezone.utc):
+                errors.append(_issue("REVIEW_EXPIRED", "review is expired; review is invalidated"))
         missing_fields = [case_id for case_id in scope if not fields.get(case_id)]
         if missing_fields:
             errors.append(_issue("REVIEWED_FIELDS_MISSING", "approved cases without reviewed fields: " + ", ".join(missing_fields)))

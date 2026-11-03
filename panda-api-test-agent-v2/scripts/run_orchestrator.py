@@ -178,6 +178,35 @@ def _canonical_review(review: Any, case_ids: list[str]) -> dict[str, Any]:
     return _adapter().canonical_review(review, case_ids)
 
 
+_REVIEW_ERROR_HINTS = {
+    "REVIEWED_FIELDS_MISSING": (
+        "expected reviewed_fields to be a per-case map like "
+        '{"NA-001": ["request", "assertions", "data_dependencies", "side_effects", "cleanup"], ...} '
+        "covering every approved case id; see references/interaction-rules.md \u00a71.5"),
+    "REVIEW_TIME_REQUIRED": (
+        "expected an ISO8601 datetime with timezone under reviewed_at / approved_at / decided_at, "
+        "e.g. \"2026-11-03T09:00:00+08:00\""),
+    "FINGERPRINT_REQUIRED": (
+        "expected the compiled plan_fingerprint from plan.json (field plan_fingerprint) "
+        "so the approval binds to the exact reviewed design"),
+}
+
+
+def _format_review_errors(errors: list[dict[str, Any]]) -> str:
+    """Render review validation errors as 'CODE: message (+ hint)' so callers can
+    fix the review structurally instead of guessing what was missing."""
+    parts = []
+    for item in errors or []:
+        code = item.get("code") if isinstance(item, dict) else None
+        message = item.get("message") if isinstance(item, dict) else str(item)
+        text = f"[{code}] {message}" if code else str(message)
+        hint = _REVIEW_ERROR_HINTS.get(code or "")
+        if hint:
+            text += f" | hint: {hint}"
+        parts.append(text)
+    return " ; ".join(parts)
+
+
 def _validate_unified_review(review: dict[str, Any], plan: dict[str, Any], case_ids: list[str]) -> dict[str, Any]:
     """Fail-closed validation of an executable review against the compiled plan.
 
@@ -193,7 +222,7 @@ def _validate_unified_review(review: dict[str, Any], plan: dict[str, Any], case_
     if declared and declared != plan.get("plan_fingerprint"):
         errors.append("review fingerprint does not match the compiled plan fingerprint; the design changed after approval")
     if errors:
-        raise OrchestrationError("; ".join(errors))
+        raise OrchestrationError(_format_review_errors(canonical["errors"]))
     return canonical["review"]
 
 
@@ -211,7 +240,10 @@ def compile_and_create_run(intent: dict[str, Any], run_dir: str | Path, *, run_i
     plan = compiler.compile_plan(intent)
     entry_type = intent.get("entry_type") or intent.get("intent_type") or "single_api_quality"
     review = intent.get("review") if isinstance(intent.get("review"), dict) else {"status": "pending_review", "approved_case_ids": []}
-    case_ids = [item.get("case_id") for item in plan.get("tasks", []) if isinstance(item, dict) and item.get("case_id")]
+    case_ids = [item.get("case_id") or item.get("task_id") for item in (plan.get("candidate_cases") or plan.get("tasks", [])) if isinstance(item, dict) and (item.get("case_id") or item.get("task_id"))]
+    task_case_ids = [item.get("case_id") or item.get("task_id") for item in plan.get("tasks", []) if isinstance(item, dict) and (item.get("case_id") or item.get("task_id"))]
+    if set(case_ids) != set(task_case_ids):
+        raise OrchestrationError("plan candidate_cases and tasks diverged; blocked candidates must remain in the execution plan as not_run")
     canonical = _canonical_review(review, case_ids)
     normalized_review = canonical["review"]
     if normalized_review.get("status") not in entry_state_mod.REVIEW_STATUSES:
@@ -244,6 +276,15 @@ def compile_and_create_run(intent: dict[str, Any], run_dir: str | Path, *, run_i
         },
     )
     initial_action = "execute_slice" if normalized_review.get("status") in entry_state_mod.EXECUTABLE_REVIEWS else "request_approval" if normalized_review.get("status") == "pending_review" else "review_not_executable"
+    initial_next_action = {
+        "action": initial_action,
+        "slice_id": "S1" if initial_action == "execute_slice" else None,
+    }
+    if initial_action == "request_approval":
+        initial_next_action.update({
+            "approval_kind": "design_review",
+            "design_review_still_valid": False,
+        })
     state.append_event(run_dir, {
         "type": "review_recorded",
         "source": "create_run",
@@ -254,7 +295,7 @@ def compile_and_create_run(intent: dict[str, Any], run_dir: str | Path, *, run_i
         "approval_field_source": normalized_review.get("approval_field_source"),
         "fingerprint_source": normalized_review.get("fingerprint_source"),
     })
-    return {"run": head, "plan": plan, "next_action": {"action": initial_action, "slice_id": "S1" if initial_action == "execute_slice" else None}, "review": normalized_review}
+    return {"run": head, "plan": plan, "next_action": initial_next_action, "review": normalized_review}
 
 
 def record_review(run_dir: str | Path, review: dict[str, Any]) -> dict[str, Any]:
@@ -283,7 +324,10 @@ def record_review(run_dir: str | Path, review: dict[str, Any]) -> dict[str, Any]
     if state.get("status") in {"reduced", "reported"}:
         raise OrchestrationError("run already reduced; a further decision must start a new run instead of rewriting a closed one")
 
-    case_ids = [item.get("case_id") for item in plan.get("tasks") or [] if isinstance(item, dict) and item.get("case_id")]
+    case_ids = [item.get("case_id") or item.get("task_id") for item in (plan.get("candidate_cases") or plan.get("tasks") or []) if isinstance(item, dict) and (item.get("case_id") or item.get("task_id"))]
+    task_case_ids = [item.get("case_id") or item.get("task_id") for item in plan.get("tasks") or [] if isinstance(item, dict) and (item.get("case_id") or item.get("task_id"))]
+    if set(case_ids) != set(task_case_ids):
+        raise OrchestrationError("run plan candidate_cases and tasks diverged; blocked candidates must remain as not_run")
     canonical = _canonical_review(review, case_ids)
     status = canonical["status"]
     if status in {"rejected", "plan_only", "expired", "superseded"}:
@@ -313,7 +357,7 @@ def record_review(run_dir: str | Path, review: dict[str, Any]) -> dict[str, Any]
         return {"run_dir": str(root), "review_status": status, "approved_case_ids": [], "next_action": "request_approval"}
 
     if canonical["errors"]:
-        raise OrchestrationError("; ".join(item["message"] for item in canonical["errors"]))
+        raise OrchestrationError(_format_review_errors(canonical["errors"]))
     approved = _validate_unified_review(review, plan, case_ids)
     scope = list(approved.get("approved_case_ids") or [])
 
@@ -365,6 +409,47 @@ def record_review(run_dir: str | Path, review: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def _cleanup_first_guidance(plan: dict[str, Any], recovery: dict[str, Any]) -> list[str]:
+    """Explain, per pending object, which task is expected to settle it.
+
+    A pending object is waiting on either a cleanup task that references its
+    object_ref, or a business task with a matching settlement declaration. The
+    guidance names both so an operator can see what is missing instead of just
+    'cleanup_first'.
+    """
+    pending = recovery.get("pending_resources") or []
+    if not pending:
+        return []
+    cleanup_by_obj: dict[str, list[str]] = {}
+    settlement_by_obj: dict[str, list[str]] = {}
+    for task in plan.get("tasks") or []:
+        if not isinstance(task, dict):
+            continue
+        obj_ref = task.get("object_ref")
+        if not isinstance(obj_ref, str):
+            continue
+        if task.get("type") == "cleanup":
+            cleanup_by_obj.setdefault(obj_ref, []).append(str(task.get("task_id")))
+        settlement = task.get("settlement") if isinstance(task.get("settlement"), dict) else None
+        if settlement and settlement.get("on_success", True) and settlement.get("object_ref"):
+            settlement_by_obj.setdefault(str(settlement["object_ref"]), []).append(str(task.get("task_id")))
+    guidance = []
+    for item in pending:
+        if not isinstance(item, dict):
+            continue
+        obj = str(item.get("object_id"))
+        source = item.get("source_task") or "unknown"
+        cleaners = cleanup_by_obj.get(obj) or cleanup_by_obj.get(f"net_address:{obj}") or []
+        declarers = settlement_by_obj.get(obj) or []
+        if cleaners:
+            guidance.append(f"pending object {obj} (created by {source}) waits for cleanup task(s): {', '.join(cleaners)}")
+        elif declarers:
+            guidance.append(f"pending object {obj} (created by {source}) waits for settlement declaration on task(s): {', '.join(declarers)}")
+        else:
+            guidance.append(f"pending object {obj} (created by {source}) has no cleanup task and no settlement declaration; add a settlement to its writer or a cleanup task")
+    return guidance
+
+
 def next_action(run_dir: str | Path) -> dict[str, Any]:
     """Return one deterministic action for the next conversation round."""
     root = Path(run_dir).resolve()
@@ -379,19 +464,53 @@ def next_action(run_dir: str | Path) -> dict[str, Any]:
     if state.get("review_status") in {"rejected", "plan_only", "expired", "superseded"}:
         return {"action": "review_not_executable", "reason": f"review status {state.get('review_status')} is not executable"}
     if state.get("review_status") == "pending_review" or state.get("status") == "awaiting_approval":
-        return {"action": "request_approval", "slice_id": state.get("next_slice_id"), "approved_case_ids": state.get("approved_case_ids") or []}
-    if state.get("status") == "blocked":
-        return {"action": "blocked", "reason": "run is blocked; resolve the recorded gate or failure before continuing"}
+        return {
+            "action": "request_approval",
+            "approval_kind": "design_review",
+            "design_review_still_valid": False,
+            "slice_id": state.get("next_slice_id"),
+            "approved_case_ids": state.get("approved_case_ids") or [],
+            "plan_fingerprint": plan.get("plan_fingerprint"),
+        }
     recovery = executor.validate_recovery(root)
     if recovery["action"] == "cleanup_first":
-        return {"action": "execute_cleanup_first", "slice_ids": recovery.get("cleanup_slice_ids") or [], "recovery": recovery}
+        return {"action": "execute_cleanup_first", "slice_ids": recovery.get("cleanup_slice_ids") or [], "recovery": recovery,
+                "guidance": _cleanup_first_guidance(plan, recovery)}
     if recovery["action"] == "replay_volatile_source":
         return {"action": "replay_volatile_source", "slice_ids": recovery.get("replay_slice_ids") or [], "recovery": recovery, "requires_runtime_context": True}
+    if state.get("status") == "blocked":
+        if state.get("failure_class") == "high_risk_approval_required":
+            slice_id = state.get("next_slice_id")
+            slice_spec = next((item for item in plan.get("slices") or [] if item.get("slice_id") == slice_id), {})
+            approval = slice_spec.get("approval") or {}
+            return {
+                "action": "request_approval",
+                "approval_kind": "high_risk_authorization",
+                "design_review_still_valid": state.get("review_status") in {"approved", "partially_approved"},
+                "slice_id": slice_id,
+                "task_ids": slice_spec.get("task_ids") or [],
+                "reasons": approval.get("reasons") or [],
+                "plan_fingerprint": plan.get("plan_fingerprint"),
+            }
+        return {
+            "action": "blocked",
+            "failure_class": state.get("failure_class"),
+            "design_review_still_valid": state.get("review_status") in {"approved", "partially_approved"},
+            "reason": "run is blocked; resolve the recorded gate or failure before continuing",
+        }
     completed = set(state.get("completed_slices") or [])
     for item in plan.get("slices") or []:
         if item.get("slice_id") not in completed:
             if item.get("approval", {}).get("required"):
-                return {"action": "request_approval", "slice_id": item["slice_id"], "task_ids": item.get("task_ids") or []}
+                return {
+                    "action": "request_approval",
+                    "approval_kind": "high_risk_authorization",
+                    "design_review_still_valid": True,
+                    "slice_id": item["slice_id"],
+                    "task_ids": item.get("task_ids") or [],
+                    "reasons": (item.get("approval") or {}).get("reasons") or [],
+                    "plan_fingerprint": plan.get("plan_fingerprint"),
+                }
             return {"action": "execute_slice", "slice_id": item["slice_id"], "task_ids": item.get("task_ids") or [], "execution": item.get("execution")}
     return {"action": "reduce", "run_dir": str(root)}
 
@@ -407,6 +526,34 @@ def reduce_run(run_dir: str | Path) -> dict[str, Any]:
     root = Path(run_dir).resolve()
     reducer = _load("result_reducer")
     state_mod = _load("run_state")
+    if not (root / "result.json").exists():
+        # First-time reduction only: every passed fact must carry schema-valid
+        # evidence, otherwise the run cannot be closed into an immutable result
+        # whose report claims evidence closure. Existing reduced runs are
+        # immutable and are never re-validated here.
+        evidence_schema = _load("evidence_schema")
+        probe = _load("slice_executor")
+        state = state_mod.load_state(root)
+        plan = _read_json(root / "plan.json")
+        executed = set()
+        for slice_spec in plan.get("slices") or []:
+            if isinstance(slice_spec, dict) and slice_spec.get("slice_id") in set(state.get("completed_slices") or []):
+                executed.update(slice_spec.get("task_ids") or [])
+        bad = []
+        for event in probe.load_events(root / "events.jsonl") if (root / "events.jsonl").is_file() else []:
+            if event.get("type") != "task_finished" or event.get("status") != "passed":
+                continue
+            ref = event.get("evidence_ref")
+            if not ref:
+                bad.append(f"{event.get('task_id')}: passed without evidence_ref")
+                continue
+            problems = evidence_schema.validate_evidence_file(root / ref)
+            if problems:
+                bad.extend(problems[:2])
+        if bad:
+            raise OrchestrationError(
+                "reduce refused: evidence schema validation failed for " + str(len(bad))
+                + " problem(s); first: " + bad[0])
     result = reducer.reduce_run(root)
     output = root / "result.json"
     if output.exists():
@@ -479,12 +626,34 @@ def _item_verdict(verifiability: str, statuses: set[str], evidence_sound: bool, 
     return "complete", "inconclusive", "接口层通过但证据链未闭合"
 
 
+def _evidence_file_sound(refs: list[str], root: Path | None) -> tuple[bool, list[str]]:
+    """Case-level evidence closure check.
+
+    A case's evidence is sound when every ref resolves to a readable evidence
+    file that passes the minimum viable raw-request schema. Run-level verdict is
+    deliberately NOT consulted: a Run may be inconclusive because an unrelated
+    candidate was planned not_run, which must not unclose THIS acceptance
+    item's complete evidence (the r7 report defect).
+    """
+    if not refs:
+        return False, ["no evidence refs"]
+    if root is None:
+        # Without a resolvable run root we cannot verify files; stay honest.
+        return False, ["run root unavailable for evidence validation"]
+    evidence_schema = _load("evidence_schema")
+    problems: list[str] = []
+    for ref in refs:
+        problems.extend(evidence_schema.validate_evidence_file(root / ref))
+    return not problems, problems
+
+
 def _acceptance_items(
     criteria: list[dict[str, Any]],
     tasks: dict[str, dict[str, Any]],
     case_records: dict[str, dict[str, Any]],
     run_verdicts: dict[str, str],
     external_by_ac: dict[str, dict[str, Any]] | None = None,
+    evidence_roots: dict[str, Path] | None = None,
 ) -> list[dict[str, Any]]:
     external_by_ac = external_by_ac or {}
     items = []
@@ -495,7 +664,15 @@ def _acceptance_items(
         statuses = {record.get("status") for record in records}
         refs = sorted({ref for record in records for ref in record.get("evidence_refs") or []})
         source_runs = {record.get("source_run_id") for record in records if record.get("source_run_id")}
-        evidence_sound = bool(refs) and bool(source_runs) and all(run_verdicts.get(run_id) == "passed" for run_id in source_runs)
+        evidence_roots = evidence_roots or {}
+        per_case_sound = []
+        evidence_problems: list[str] = []
+        for record in records:
+            refs = list(record.get("evidence_refs") or [])
+            ok, problems = _evidence_file_sound(refs, evidence_roots.get(record.get("source_run_id") or ""))
+            per_case_sound.append(ok)
+            evidence_problems.extend(problems)
+        evidence_sound = bool(records) and all(per_case_sound)
         verifiability = criterion.get("interface_verifiability", "direct")
         external = external_by_ac.get(ac_id) or {}
         external_status = external.get("status") if external.get("status") in _EXTERNAL_STATUSES else "missing"
@@ -508,6 +685,8 @@ def _acceptance_items(
         gaps = list(criterion.get("gaps") or [])
         if verdict != "passed":
             gaps.append("证据或执行链尚未闭合")
+        if not evidence_sound and evidence_problems:
+            gaps.append("证据未通过最低原始请求 schema 校验：" + "; ".join(evidence_problems[:3]))
         evidence_refs: list[str] = []
         if verdict == "passed":
             evidence_refs = sorted(source_runs)
@@ -569,7 +748,7 @@ def _defect_issues(defects: list[dict[str, Any]], tasks: dict[str, dict[str, Any
             continue
         case_id = defect.get("case_id")
         task = tasks.get(case_id) or {}
-        classification = defect.get("classification") or "product_defect"
+        classification = defect.get("classification") or "unclassified_observation"
         status = defect.get("status") or "open"
         issues.append({
             "id": str(defect.get("defect_id") or f"DEF-{case_id}"),
@@ -671,16 +850,18 @@ def build_requirement_manifest(run_dir: str | Path, *, title: str | None = None)
                 "evidence_refs": list(item.get("evidence_refs") or []),
                 "source_run_id": run_id,
             }
-    items = _acceptance_items(criteria, tasks, case_records, {run_id: result.get("verdict")})
+    items = _acceptance_items(criteria, tasks, case_records, {run_id: result.get("verdict")},
+                              evidence_roots={run_id: root})
     issues = _gap_issues(items)
     verdict = _overall_verdict(items, issues)
     return {
         "schema_version": "1.0",
         "report_id": f"AR-{plan.get('requirement_id')}-{run_id}",
         "report_version": "1.0",
+        "report_view_version": "1.0",
         "requirement": {"id": plan.get("requirement_id"), "title": title or plan.get("requirement_id"), "acceptance_total": len(items)},
         "baseline": {"environment": (run.get("environment_snapshot") or {}).get("environment_id")},
-        "generated_at": run.get("started_at"),
+        "generated_at": _load("run_state").now_iso(),
         "acceptance_items": items,
         "evidence_runs": _evidence_runs([root], {str(root): result}),
         "issues": issues,
@@ -777,6 +958,10 @@ def build_requirement_manifest_for_runs(
         if isinstance(record, dict)
     }
     run_verdicts = {item.get("run_id"): item.get("status") for item in aggregate.get("runs") or [] if isinstance(item, dict)}
+    run_id_to_root = {}
+    for root in roots:
+        if (root / "run.json").is_file():
+            run_id_to_root[_read_json(root / "run.json").get("run_id")] = root
 
     known_ac_ids = {
         str(item.get("ac_id") or item.get("id"))
@@ -797,6 +982,7 @@ def build_requirement_manifest_for_runs(
         case_records,
         run_verdicts,
         external_by_ac=(summary or {}).get("per_ac"),
+        evidence_roots=run_id_to_root,
     )
     issues = (
         _gap_issues(items)
@@ -817,13 +1003,14 @@ def build_requirement_manifest_for_runs(
         "schema_version": "1.0",
         "report_id": f"AR-{resolved_requirement}-CURRENT",
         "report_version": "1.0",
+        "report_view_version": "1.0",
         "requirement": {
             "id": resolved_requirement,
             "title": title or resolved_requirement,
             "acceptance_total": len(items),
         },
         "baseline": {"environment": (current_run.get("environment_snapshot") or {}).get("environment_id")},
-        "generated_at": current_run.get("started_at"),
+        "generated_at": _load("run_state").now_iso(),
         "acceptance_items": items,
         "evidence_runs": evidence,
         "issues": issues,
@@ -875,7 +1062,7 @@ def refresh_requirement_report(
     _write_json_atomic(manifest_path, manifest)
     report_path = Path(output_html).resolve()
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(renderer.render(manifest), encoding="utf-8", newline="\n")
+    report_path.write_text(renderer.render(manifest, base_dir=manifest_path.parent), encoding="utf-8", newline="\n")
     verdict, reason = renderer.overall_verdict(manifest)
     if manifest["release_recommendation"] != _RELEASE_RECOMMENDATION[verdict]:
         raise OrchestrationError("release_recommendation contradicts the rendered verdict")

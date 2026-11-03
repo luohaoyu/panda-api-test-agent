@@ -8,6 +8,7 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = SKILL_DIR / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+from environment_secret_store import write_environment_secrets
 from runtime_secret_bridge import write_local_runtime_envelope
 from trusted_host import execute_test_package
 
@@ -57,18 +58,53 @@ class TrustedHostTests(unittest.TestCase):
             },
         }
 
+    def _project_package(self, root, package=None):
+        package = package or self._package()
+        package["test_config"] = {"path": "docs/test-config.md"}
+        package_path = root / ".panda-api-test-agent" / "runs" / "RUN-001" / "package.json"
+        package_path.parent.mkdir(parents=True)
+        package_path.write_text(json.dumps(package), encoding="utf-8")
+        config_path = root / "docs" / "test-config.md"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            """```yaml test-config
+metadata:
+  schema_version: "2.1"
+  project_id: demo
+  config_revision: 1
+environments:
+  test3:
+    runtime_bindings:
+      base_url:
+        key: TEST3_BASE_URL
+        required: true
+        secret: false
+        format: url
+        value: https://config.example
+      auth:
+        credential:
+          key: TEST3_TOKEN
+          required: true
+          secret: true
+          format: string
+```
+""",
+            encoding="utf-8",
+        )
+        return package, package_path
+
     def test_preflight_block_is_timed_and_secret_is_not_persisted(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            package_path = root / "package.json"
-            package_path.write_text(json.dumps(self._package()), encoding="utf-8")
+            package, package_path = self._project_package(root)
             outcome_path = root / "host-outcome.json"
             secret = "secret-token-must-not-persist"
+            write_environment_secrets(package_path, package, {"TEST3_TOKEN": secret})
             outcome = execute_test_package(
                 package_path,
                 root / "run",
                 root / "report.html",
-                runtime_values={"TEST3_BASE_URL": "bad-url", "TEST3_TOKEN": secret},
+                runtime_values={"TEST3_BASE_URL": "bad-url"},
                 outcome_path=outcome_path,
             )
             self.assertEqual(outcome["status"], "blocked")
@@ -114,8 +150,7 @@ class TrustedHostTests(unittest.TestCase):
     def test_missing_binding_blocks_without_creating_outputs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            package_path = root / "package.json"
-            package_path.write_text(json.dumps(self._package()), encoding="utf-8")
+            package, package_path = self._project_package(root)
             outcome = execute_test_package(
                 package_path,
                 root / "run",
@@ -130,10 +165,7 @@ class TrustedHostTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             project = root / "project"
-            package_path = project / ".panda-api-test-agent" / "runs" / "RUN-001" / "package.json"
-            package_path.parent.mkdir(parents=True)
-            package = self._package()
-            package_path.write_text(json.dumps(package), encoding="utf-8")
+            package, package_path = self._project_package(project)
             secret = "local-secret-token-must-not-persist"
             secret_path = write_local_runtime_envelope(
                 package_path,
@@ -158,14 +190,56 @@ class TrustedHostTests(unittest.TestCase):
             self.assertIn("TEST3_TOKEN", persisted)
             self.assertEqual(outcome["stages"]["local_secret_consume"]["status"], "completed")
 
+    def test_package_preflight_blocks_before_persistent_secret_read(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package = self._package()
+            package["execution_control"] = {
+                "fail_closed_before_http": True,
+                "formal_http_allowed": False,
+                "stop_stage": "preflight",
+                "blocking_gap_ids": ["GAP-1"],
+                "reason": "blocked",
+            }
+            package["known_gaps"] = [
+                {"gap_id": "GAP-1", "blocking": True, "stage": "probe", "description": "blocked"}
+            ]
+            package, package_path = self._project_package(root, package)
+            target = package_path.parents[2] / "local" / "secrets" / "environments" / "test3.secret.json"
+            target.parent.mkdir(parents=True)
+            target.write_text("{invalid", encoding="utf-8")
+            outcome = execute_test_package(
+                package_path,
+                root / "run",
+                root / "report.html",
+            )
+            self.assertEqual(outcome["status"], "blocked")
+            self.assertEqual(outcome["stopped_at_stage"], "package_execution_preflight")
+            self.assertNotIn("runtime_value_resolution", outcome["stages"])
+
+    def test_resolver_uses_persistent_secret_without_mutating_callers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package, package_path = self._project_package(root)
+            write_environment_secrets(package_path, package, {"TEST3_TOKEN": "persistent-token"})
+            runtime_values = {"TEST3_BASE_URL": "bad-url"}
+            snapshot = dict(runtime_values)
+            outcome = execute_test_package(
+                package_path,
+                root / "run",
+                root / "report.html",
+                runtime_values=runtime_values,
+            )
+            self.assertEqual(outcome["status"], "blocked")
+            self.assertEqual(outcome["stopped_at_stage"], "runtime_preflight")
+            self.assertEqual(runtime_values, snapshot)
+            self.assertEqual(outcome["stages"]["runtime_value_resolution"]["status"], "completed")
+
     def test_local_secret_failure_blocks_before_runtime_preflight(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             project = root / "project"
-            package_path = project / ".panda-api-test-agent" / "runs" / "RUN-001" / "package.json"
-            package_path.parent.mkdir(parents=True)
-            package = self._package()
-            package_path.write_text(json.dumps(package), encoding="utf-8")
+            package, package_path = self._project_package(project)
             secret_path = write_local_runtime_envelope(
                 package_path,
                 package,

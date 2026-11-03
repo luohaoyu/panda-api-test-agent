@@ -172,7 +172,7 @@ AC 结论矩阵：
 
 `kind=external_evidence` 指向需求级外部证据账本（`external-evidence.jsonl`），其 `id` 为登记记录自身的 `evidence_id`（`EXT-*`），不经由运行生成，也不得改写。
 
-需求报告只做索引。认证头、令牌、密码及未脱敏响应不得进入清单或报告。
+需求报告只做索引。认证头、令牌、密码与响应报文按原样进入清单与报告，报告不得改写证据原文。
 
 报告器在渲染前校验证据引用：`evidence_runs` 声明了 `result_path` / `report_path` 时，对应文件必须存在（相对路径自 manifest 目录逐级向上解析）；`kind=business_execution` 与 `kind=external_evidence` 的运行必须声明 `result_path`，且该文件应能通过 `panda-ai-api-tester-v2` 的 `validate_result.py`（外部证据账本按其自身格式校验）。无法通过校验的运行只能标记 `result_source=manual` 并降级为参考证据，不得支撑任何 `passed` 结论。
 
@@ -187,7 +187,44 @@ AC 结论矩阵：
 
 不得仅依据某次运行的 verdict 直接代替需求级结论。
 
-## 10. 确定性契约
+## 10. 报告信息架构
+
+正式 HTML 使用 `panda-requirement-report@4.0.0` 的唯一合并版信息架构。旧版“验收项卡片 + 独立问题区 + 证据索引”页面退出正式生成链路，不再继续兼容其视觉结构；历史 HTML 与运行证据仍保持不可变。
+
+固定层级为：
+
+1. **总体结论**：首屏显示 `report_id`、需求标识、总体结论、结论原因、`release_recommendation` 和最多 3 个当前关键动作。
+2. **需求覆盖**：同时显示验收项触达率、完整覆盖率、验收通过率和接口执行覆盖率；验收项表保留 `direct / partial / none`、执行状态、结论、场景和缺口。
+3. **需求涉及接口**：按 `HTTP method + 规范化 path` 聚合接口，展示关联场景、用例数、检查用途、请求证据数量和结果。接口结果不得替代 AC 或需求结论。
+4. **场景、用例与检查证据**：按“场景 → 用例 → 检查项 → 原始请求/响应”下钻。场景只用于覆盖分类，不新增独立事实，也不要求建立接口调用顺序。
+5. **问题、缺口与残留风险**：产品缺陷、验证缺口、外部补验和清理残留分别展示，不得相互冒充。
+6. **下一步与证据降级索引**：给出唯一主行动，并列出缺失、损坏、未映射或只能降级展示的证据。
+7. **审计信息**：页尾显示报告身份、模板版本、共享主题指纹、manifest 生成时间，并声明历史运行证据未修改。
+
+默认展开失败、阻塞和未闭合场景；通过场景及原始请求/响应默认折叠。页面提供场景状态过滤，兼容移动端和打印。原始请求/响应按原样展示，不做二次遮蔽。
+
+## 10.1 报告派生展示模型
+
+正式事实源仍是 `requirement-report.json`、不可变 Run、`result.json` 与 evidence。`scripts/report_view_adapter.py::build_report_view(manifest, base_dir)` 只读这些事实，构造 `report-view/1.0` 派生视图供渲染器使用，不写回 Run，也不改变验收结论。
+
+派生视图至少包含：
+
+```text
+summary / coverage / interfaces / scenarios
+issues / gaps / residual_risks
+run_index / unmapped_evidence
+```
+
+其中：
+
+- 场景优先使用 `scenario_refs`，其次使用 `scenario_type`、质量维度、业务规则或 AC；仍无法关联时归入“未分类场景”。
+- 用例来自 plan 中的 `task_id/case_id`，状态与证据来自 result 和 evidence。
+- 检查项来自结构化 assertion/Oracle；没有明细时显示“无结构化检查项明细”，不得根据响应重新发明断言。
+- 多个接口作为同一用例的关联请求证据展示，不构造 `Execution Step`，不表达未被事实记录的业务顺序。
+- 原始报文缺失、损坏、截断或无法关联时必须明确标注，并进入降级索引；不得伪造内容或参与通过率计算。
+- 接口执行覆盖率以 plan 中唯一 HTTP 接口为分母，以实际存在 exchange 证据的计划接口为分子；证据中额外出现的复核接口可以展示，但不扩张分母。
+
+## 11. 确定性契约
 
 正式报告必须是 manifest 的纯函数产物：同一份 `requirement-report.json` 在任何时间、任何机器、任何时区、任何换行习惯下渲染出的字节完全一致。做不到这一点的产物只能算草稿，不得作为验收证据引用。
 

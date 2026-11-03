@@ -91,15 +91,23 @@ class ExecuteDbOracleTests(unittest.TestCase):
     def _run(self, overrides=None):
         return execute_db_oracle(_oracle(**(overrides or {})), self.context, evidence_dir=self.evidence_dir)
 
-    def test_passes_and_writes_masked_evidence(self):
+    def test_passes_and_writes_verbatim_evidence(self):
         fact = self._run()
         self.assertEqual(fact["status"], "passed")
         self.assertEqual(fact["row_count"], 1)
         self.assertTrue(fact["evidence_ref"] and Path(fact["evidence_ref"]).is_file())
         payload = json.loads(Path(fact["evidence_ref"]).read_text(encoding="utf-8"))
-        self.assertEqual(payload["rows"][0]["phone"], "[REDACTED]")
-        self.assertNotIn("13800138000", json.dumps(payload))
-        self.assertNotIn(f"sqlite:///{self.db_path}", json.dumps(payload))
+        self.assertEqual(payload["rows"][0]["phone"], "13800138000")
+        self.assertEqual(payload["binding"], "uat_db")
+
+    def test_structured_sqlite_config_is_supported_without_mutation(self):
+        config = {"driver": "sqlite", "path": str(self.db_path), "options": {"mode": "ro"}}
+        context = RuntimeContext.from_mapping(
+            "test-env", {"uat_db": config, "order_no": "ORD-1"}, secret_keys={"uat_db"}
+        )
+        fact = execute_db_oracle(_oracle(), context)
+        self.assertEqual(fact["status"], "passed")
+        self.assertEqual(config["options"]["mode"], "ro")
 
     def test_data_mismatch_is_failed_not_error(self):
         fact = self._run({"assertions": [{"assertion_id": "A", "source": "row[0].status", "operator": "equals", "expected": "SHIPPED"}]})
@@ -160,6 +168,7 @@ class PlanCompilerDbOracleTests(unittest.TestCase):
         oracle_task = next(task for task in plan["tasks"] if task["task_id"] == "OR-1")
         self.assertEqual(oracle_task["type"], "oracle")
         self.assertEqual(oracle_task["evidence_kind"], "oracle_verification")
+        self.assertEqual(oracle_task["builtin_oracle_executor"], "db")
 
     def test_invalid_db_oracle_statement_is_refused_at_compile_time(self):
         intent = self._intent({"task_id": "OR-1", "type": "oracle", "oracle_type": "db", **_oracle(statement="DELETE FROM orders WHERE order_no = 'A'")})

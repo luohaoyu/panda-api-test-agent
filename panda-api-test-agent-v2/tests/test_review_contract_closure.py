@@ -270,7 +270,7 @@ class ReportClosureTests(unittest.TestCase):
         self.assertEqual(report.overall_verdict(manifest)[0], "PASS")
         self.assertEqual(manifest["aggregation"]["run_count"], 2)
         self.assertEqual({run["id"] for run in manifest["evidence_runs"]}, {"RUN-AGG-1", "RUN-AGG-2"})
-        fixed = [issue for issue in manifest["issues"] if issue["type"] == "defect" and issue["status"] == "fixed"]
+        fixed = [issue for issue in manifest["issues"] if issue["type"] == "test_gap" and issue["status"] == "fixed"]
         self.assertTrue(fixed)
         self.assertIn("多运行 current", report.render(manifest))
 

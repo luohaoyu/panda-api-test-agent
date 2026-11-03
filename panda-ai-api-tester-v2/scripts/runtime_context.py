@@ -5,9 +5,11 @@ TestPackages declare binding metadata under environment.runtime_bindings. A host
 creates one immutable RuntimeContext from in-memory values and passes it to the
 in-process pipeline. Runtime values are never loaded from os.environ here.
 """
+from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
+import copy
 import re
 import urllib.parse
 
@@ -35,13 +37,26 @@ LEGACY_AUTH_FIELDS = {
     "password_env",
     "required_env",
 }
-SUPPORTED_FORMATS = {"string", "url", "origin_list", "operation_list"}
+SUPPORTED_FORMATS = {"string", "url", "origin_list", "operation_list", "db_config", "redis_config"}
+RESOURCE_BINDINGS = {"databases": "db_config", "redis": "redis_config"}
 SUPPORTED_AUTH_TYPES = {"none", "anonymous", "bearer", "token", "header", "cookie", "basic", "headers"}
 BINDING_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 AUTH_PROBE_STRATEGIES = {"declared", "none", "blocked"}
 AUTH_PROBE_FIELDS = {"strategy", "gate_id", "side_effect_free", "blocked"}
 SAFE_PROBE_METHODS = {"GET", "HEAD", "OPTIONS"}
 UNCONFIRMED_VALUES = {"", "pending", "unknown", "tbd", "待确认"}
+
+
+def _freeze_runtime_value(value):
+    if isinstance(value, MappingABC):
+        return MappingProxyType({key: _freeze_runtime_value(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_runtime_value(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_runtime_value(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_freeze_runtime_value(item) for item in value)
+    return copy.deepcopy(value)
 
 
 @dataclass(frozen=True)
@@ -67,7 +82,7 @@ class RuntimeContext:
         unknown_secrets = secrets - set(values)
         if unknown_secrets:
             raise RuntimeContextError("secret_keys must reference provided runtime values")
-        object.__setattr__(self, "values", MappingProxyType(values))
+        object.__setattr__(self, "values", MappingProxyType({key: _freeze_runtime_value(value) for key, value in values.items()}))
         object.__setattr__(self, "secret_keys", secrets)
 
     @classmethod
@@ -87,9 +102,6 @@ class RuntimeContext:
             return default
         value = self.values.get(key, default)
         return default if value in (None, "") else value
-
-    def redaction_values(self):
-        return [str(self.values[key]) for key in self.secret_keys if self.values.get(key) not in (None, "")]
 
     def metadata(self):
         return {
@@ -184,6 +196,37 @@ def binding_specs(package):
             raise RuntimeContextError(f"{name} binding must use secret=false, format={expected_format}")
         specs.append(spec)
 
+    for collection_name, expected_format in RESOURCE_BINDINGS.items():
+        resources = bindings.get(collection_name, {})
+        if not isinstance(resources, dict):
+            raise RuntimeContextError(f"environment.runtime_bindings.{collection_name} must be an object")
+        for resource_name, raw_spec in resources.items():
+            if not isinstance(resource_name, str) or not BINDING_KEY_PATTERN.fullmatch(resource_name):
+                raise RuntimeContextError(
+                    f"environment.runtime_bindings.{collection_name} resource names must be valid identifiers"
+                )
+            if not isinstance(raw_spec, dict):
+                raise RuntimeContextError(
+                    f"environment.runtime_bindings.{collection_name}.{resource_name} must be a binding object"
+                )
+            missing_fields = sorted({"key", "required", "secret", "format"} - set(raw_spec))
+            if missing_fields:
+                raise RuntimeContextError(
+                    f"environment.runtime_bindings.{collection_name}.{resource_name} is missing fields: {', '.join(missing_fields)}"
+                )
+            spec = _validate_binding_spec(
+                f"environment.runtime_bindings.{collection_name}.{resource_name}",
+                raw_spec,
+                default_required=False,
+                default_secret=True,
+                default_format=expected_format,
+            )
+            if spec["format"] != expected_format:
+                raise RuntimeContextError(
+                    f"{collection_name}.{resource_name} binding must use format={expected_format}"
+                )
+            specs.append(spec)
+
     auth = bindings.get("auth", {"type": "none"})
     if not isinstance(auth, dict):
         raise RuntimeContextError("environment.runtime_bindings.auth must be an object")
@@ -255,6 +298,35 @@ def binding_spec(package, name):
     if not expected or name not in bindings:
         return None
     return _validate_binding_spec(f"environment.runtime_bindings.{name}", bindings[name], default_format=expected)
+
+
+def resource_binding_spec(package, collection_name, resource_name):
+    expected_format = RESOURCE_BINDINGS.get(collection_name)
+    if not expected_format:
+        raise RuntimeContextError(f"unsupported runtime resource collection: {collection_name}")
+    bindings = runtime_bindings(package)
+    resources = bindings.get(collection_name, {})
+    if not isinstance(resources, dict):
+        raise RuntimeContextError(f"environment.runtime_bindings.{collection_name} must be an object")
+    if resource_name not in resources:
+        return None
+    raw_spec = resources[resource_name]
+    if not isinstance(raw_spec, dict):
+        raise RuntimeContextError(
+            f"environment.runtime_bindings.{collection_name}.{resource_name} must be a binding object"
+        )
+    missing_fields = sorted({"key", "required", "secret", "format"} - set(raw_spec))
+    if missing_fields:
+        raise RuntimeContextError(
+            f"environment.runtime_bindings.{collection_name}.{resource_name} is missing fields: {', '.join(missing_fields)}"
+        )
+    return _validate_binding_spec(
+        f"environment.runtime_bindings.{collection_name}.{resource_name}",
+        resources[resource_name],
+        default_required=False,
+        default_secret=True,
+        default_format=expected_format,
+    )
 
 
 def auth_config(package):
@@ -463,6 +535,12 @@ def _validate_value_format(spec, value):
             parts = operation.split(" ", 1)
             if len(parts) != 2 or parts[0].upper() not in {"GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"} or not parts[1].startswith("/"):
                 return f"runtime binding {spec['key']} contains an invalid operation"
+        return None
+    if spec["format"] in {"db_config", "redis_config"}:
+        if not isinstance(value, MappingABC):
+            return f"runtime binding {spec['key']} must be a structured {spec['format']} object"
+        if any(not isinstance(key, str) or not key for key in value):
+            return f"runtime binding {spec['key']} {spec['format']} keys must be non-empty strings"
         return None
     return f"runtime binding {spec['key']} has unsupported format"
 

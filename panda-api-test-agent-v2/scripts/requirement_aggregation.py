@@ -127,7 +127,7 @@ def load_run_record(run_dir: str | Path, *, sequence: int = 1) -> dict[str, Any]
     return record
 
 
-def compute_defect_signature(requirement_id: str, case_id: str, assertion: dict[str, Any], classification: str = "product_defect") -> str:
+def compute_defect_signature(requirement_id: str, case_id: str, assertion: dict[str, Any], classification: str = "unclassified_observation") -> str:
     normalized = {
         "requirement_id": requirement_id,
         "case_id": case_id,
@@ -155,8 +155,8 @@ def _defects_from_run(record: dict[str, Any]) -> list[dict[str, Any]]:
         if task.get("status") not in {"failed", "error"} or task.get("defect_id"):
             continue
         for assertion in task.get("assertion_results") or [{}]:
-            signature = compute_defect_signature(record.get("requirement_id") or "", task["task_id"], assertion)
-            defects.append({"signature": signature, "case_id": task["task_id"], "classification": "product_defect", "run_id": record["run_id"], "evidence_refs": task.get("evidence_refs") or []})
+            signature = compute_defect_signature(record.get("requirement_id") or "", task["task_id"], assertion, "unclassified_observation")
+            defects.append({"signature": signature, "case_id": task["task_id"], "classification": "unclassified_observation", "run_id": record["run_id"], "evidence_refs": task.get("evidence_refs") or []})
     return defects
 
 

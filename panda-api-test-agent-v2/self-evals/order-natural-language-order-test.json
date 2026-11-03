@@ -21,7 +21,7 @@
     "credentials": {
       "source": "runtime_context",
       "persist": false,
-      "literal": "REDACTED"
+      "literal": "STUB-TOKEN-001"
     },
     "response": {
       "http_status": 200,

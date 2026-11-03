@@ -33,15 +33,9 @@ def classify_acceptance_criteria(criteria: list[dict[str, Any]]) -> list[dict[st
         declared = item.get("interface_verifiability")
         decision_status = "ai_decided" if declared in VERIFIABILITY else "pending_ai_decision"
         if declared not in VERIFIABILITY:
-            interface_scope_hint = item.get("interface_scope") or []
-            non_interface_scope_hint = item.get("non_interface_scope") or []
-            # Legacy structured scope is accepted only as an explicit semantic
-            # decision supplied by the caller; do not infer from one-sided scope.
-            if interface_scope_hint and non_interface_scope_hint:
-                declared = "partial"
-                decision_status = "ai_decided"
-            else:
-                declared = None
+            # Scope fields are evidence for the AI, not a semantic decision.
+            # Keep the item pending until AI explicitly classifies it.
+            declared = None
         interface_scope = list(item.get("interface_scope") or [])
         non_interface_scope = list(item.get("non_interface_scope") or [])
         if decision_status == "pending_ai_decision":
@@ -89,11 +83,29 @@ def build_requirement_validation_intent(context: dict[str, Any], environment_id:
         raise ValueError("context.requirement_id is required")
     criteria = classify_acceptance_criteria(context.get("acceptance_criteria") or context.get("acceptance_items") or [])
     interface_tasks = []
+    coverage_matrix = []
     for criterion in criteria:
+        ac_id = criterion["ac_id"]
         if criterion.get("verifiability_decision_status") != "ai_decided":
+            coverage_matrix.append({
+                "ac_id": ac_id,
+                "interface_verifiability": None,
+                "coverage_status": "pending_ai_decision",
+                "candidate_case_ids": [],
+                "external_evidence_needed": criterion.get("recommended_validation_layers") or [],
+            })
             continue
         if criterion["interface_verifiability"] == "none":
+            coverage_matrix.append({
+                "ac_id": ac_id,
+                "interface_verifiability": "none",
+                "coverage_status": "not_api_verifiable",
+                "candidate_case_ids": [],
+                "external_evidence_needed": criterion.get("recommended_validation_layers") or [],
+                "reason": criterion.get("verifiability_reason"),
+            })
             continue
+        case_ids = []
         for task in criterion.get("tasks") or []:
             if not isinstance(task, dict):
                 continue
@@ -102,9 +114,18 @@ def build_requirement_validation_intent(context: dict[str, Any], environment_id:
             item = copy.deepcopy(task)
             item.setdefault("type", "business")
             item.setdefault("requirement_refs", [requirement_id])
-            item.setdefault("acceptance_refs", [criterion["ac_id"]])
+            item.setdefault("acceptance_refs", [ac_id])
             item.setdefault("interface_verifiability", criterion["interface_verifiability"])
             interface_tasks.append(item)
+            case_ids.append(item.get("case_id") or item.get("task_id"))
+        coverage_matrix.append({
+            "ac_id": ac_id,
+            "interface_verifiability": criterion["interface_verifiability"],
+            "coverage_status": "designed" if case_ids else "uncovered",
+            "candidate_case_ids": case_ids,
+            "external_evidence_needed": criterion.get("recommended_validation_layers") or [] if criterion["interface_verifiability"] == "partial" else [],
+            "reason": criterion.get("verifiability_reason"),
+        })
     gaps = copy.deepcopy(context.get("known_gaps") or [])
     for criterion in criteria:
         if criterion.get("verifiability_decision_status") != "ai_decided":
@@ -123,7 +144,10 @@ def build_requirement_validation_intent(context: dict[str, Any], environment_id:
         "mode": "EXECUTE",
         "known_gaps": gaps,
         "tasks": interface_tasks,
+        "candidate_cases": copy.deepcopy(interface_tasks),
+        "candidate_case_ids": [item.get("case_id") or item.get("task_id") for item in interface_tasks],
         "cases": copy.deepcopy(interface_tasks),
+        "coverage_matrix": coverage_matrix,
         "review": {"status": "pending_review", "approved_case_ids": [], "reviewed_fields": []},
         "source_fingerprints": copy.deepcopy(context.get("source_fingerprints") or {}),
         "risk_policy": {"design_only": True},

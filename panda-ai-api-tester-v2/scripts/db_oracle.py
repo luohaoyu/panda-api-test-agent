@@ -25,10 +25,11 @@ import json
 import re
 import sqlite3
 import urllib.parse
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from runner import assertion_passes, is_sensitive_key, slug
+from runner import assertion_passes, slug
 
 ORACLE_KIND = "db"
 SUPPORTED_OPERATORS = {"equals", "not_equals", "exists", "all_present", "contains", "in_range"}
@@ -165,7 +166,63 @@ def _resolve_statement(statement: str, runtime_context: Any) -> str:
     return VARIABLE_PATTERN.sub(_replace, statement)
 
 
-def _connect(binding_value: str, timeout_seconds: float):
+def _config_driver(config: Mapping[str, Any]) -> str:
+    return str(config.get("driver") or config.get("dialect") or config.get("scheme") or config.get("type") or "").strip().lower()
+
+
+def _sqlite_path(config: Mapping[str, Any]) -> str:
+    value = config.get("path") or config.get("database") or config.get("dsn")
+    if not isinstance(value, str) or not value.strip():
+        raise DbOracleExecutionError("sqlite db_config requires path or database")
+    return value.strip()
+
+
+def _connect(binding_value: Any, timeout_seconds: float):
+    if isinstance(binding_value, Mapping):
+        config = dict(binding_value)
+        driver = _config_driver(config)
+        if not driver and isinstance(config.get("dsn"), str):
+            return _connect(config["dsn"], timeout_seconds)
+        if driver in {"sqlite", "sqlite3"}:
+            value = _sqlite_path(config)
+            parsed = urllib.parse.urlparse(value)
+            path = parsed.path if parsed.scheme.startswith("sqlite") and parsed.path else value
+            path = re.sub(r"^/([A-Za-z]:/)", r"\1", str(path).replace("\\", "/"))
+            uri = "file:" + urllib.parse.quote(str(Path(path).resolve()).replace("\\", "/")) + "?mode=ro"
+            return sqlite3.connect(uri, uri=True, timeout=float(config.get("timeout_seconds", timeout_seconds)))
+        if driver in {"mysql", "pymysql"}:
+            try:
+                import pymysql  # type: ignore
+            except ImportError as exc:
+                raise DbOracleExecutionError("mysql oracle driver is not installed: pymysql") from exc
+            return pymysql.connect(
+                host=config.get("host", "localhost"),
+                port=int(config.get("port", 3306)),
+                user=config.get("user") or config.get("username") or "",
+                password=config.get("password") or "",
+                database=config.get("database") or config.get("dbname"),
+                charset=config.get("charset", "utf8mb4"),
+                connect_timeout=float(config.get("connect_timeout", timeout_seconds)),
+                read_timeout=float(config.get("read_timeout", timeout_seconds)),
+            )
+        if driver in {"postgres", "postgresql", "psycopg2"}:
+            try:
+                import psycopg2  # type: ignore
+            except ImportError as exc:
+                raise DbOracleExecutionError("postgres oracle driver is not installed: psycopg2") from exc
+            kwargs = {
+                "host": config.get("host", "localhost"),
+                "port": int(config.get("port", 5432)),
+                "user": config.get("user") or config.get("username") or "",
+                "password": config.get("password") or "",
+                "dbname": config.get("database") or config.get("dbname"),
+                "connect_timeout": int(config.get("connect_timeout", timeout_seconds)),
+            }
+            if config.get("sslmode") is not None:
+                kwargs["sslmode"] = config["sslmode"]
+            return psycopg2.connect(**kwargs)
+        raise DbOracleExecutionError(f"unsupported db_config driver: {driver or '<missing>'}")
+
     value = str(binding_value).strip()
     parsed = urllib.parse.urlparse(value)
     scheme = (parsed.scheme or "").lower()
@@ -199,13 +256,6 @@ def _connect(binding_value: str, timeout_seconds: float):
             raise DbOracleExecutionError("postgres oracle driver is not installed: psycopg2") from exc
         return psycopg2.connect(value, connect_timeout=int(timeout_seconds))
     raise DbOracleExecutionError(f"unsupported db oracle binding scheme: {scheme or '<none>'}")
-
-
-def _mask_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    masked = []
-    for row in rows:
-        masked.append({key: ("[REDACTED]" if is_sensitive_key(key) else value) for key, value in row.items()})
-    return masked
 
 
 def _source_value(source: str, rows: list[dict[str, Any]]):
@@ -290,23 +340,16 @@ def execute_db_oracle(oracle: dict[str, Any], runtime_context: Any, *, evidence_
         evidence_path = Path(evidence_dir)
         evidence_path.mkdir(parents=True, exist_ok=True)
         target = evidence_path / f"oracle-{slug(oracle_id)}.json"
-        redaction_values = []
-        try:
-            redaction_values = [str(value) for value in runtime_context.redaction_values() if str(value)]
-        except Exception:
-            redaction_values = []
         payload = {
             "oracle_id": oracle_id,
             "kind": ORACLE_KIND,
             "binding": binding,
             "statement": statement,
             "row_count": len(rows),
-            "rows": _mask_rows(rows),
+            "rows": rows,
             "assertion_results": assertion_results,
         }
         text = json.dumps(payload, ensure_ascii=False, default=str)
-        for secret in redaction_values:
-            text = text.replace(secret, "[REDACTED]")
         target.write_text(text, encoding="utf-8")
         evidence_ref = str(target)
 
@@ -322,7 +365,7 @@ def execute_db_oracle(oracle: dict[str, Any], runtime_context: Any, *, evidence_
 def db_task_executor(*, evidence_dir: str | Path | None = None):
     """Build a slice_executor-compatible task executor for DB oracle tasks."""
 
-    def _execute(task: dict[str, Any], runtime_context: Any = None) -> dict[str, Any]:
+    def _execute(task: dict[str, Any], runtime_context: Any = None, **_kwargs) -> dict[str, Any]:
         declaration = declaration_from_task(task)
         if declaration is None:
             raise DbOracleError(f"db task executor only handles db oracle tasks, got: {task.get('task_id')}")

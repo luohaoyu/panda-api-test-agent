@@ -22,7 +22,12 @@ docs/
 ├── runs/
 │   └── <run-id>/
 └── local/
+    ├── secrets/
+    │   └── environments/
+    │       └── <environment-id>.secret.json
     └── runtime/
+        └── secrets/
+            └── <run-id>.secret.json
 ```
 
 项目配置和接口画像固定保存在 `docs/`；需求、运行和本机临时运行资产固定保存在工作区根目录的 `.panda-api-test-agent/`。禁止使用 `.workbuddy/.panda-api-test-agent/` 或 `.workbuddy/panda-api-test-agent/`，禁止复制 `docs/` 资产到状态目录形成第二事实源。
@@ -139,6 +144,22 @@ docs/
           "secret": true,
           "format": "string"
         }
+      },
+      "databases": {
+        "orders": {
+          "key": "UAT_ORDERS_DB",
+          "required": false,
+          "secret": true,
+          "format": "db_config"
+        }
+      },
+      "redis": {
+        "session": {
+          "key": "UAT_SESSION_REDIS",
+          "required": false,
+          "secret": true,
+          "format": "redis_config"
+        }
       }
     },
     "timeout_seconds": 10,
@@ -237,7 +258,9 @@ Runner 在发送请求前必须：
 
 ## 环境隔离与安全
 
-同一包的 HTTP、认证、DB、Redis、MQ 和可观测性必须来自一个环境节点。TestPackage 只保存 `runtime_bindings` 元数据，不保存变量值。每个绑定必须声明 `key/required/secret/format`；`production` 必须为 false；非本机 origin 必须命中 `runtime_bindings.allowed_origins` 指向的白名单。
+同一包的 HTTP、认证、DB、Redis、MQ 和可观测性必须来自一个环境节点。TestPackage 只保存 `runtime_bindings` 元数据，不保存变量值。每个绑定必须声明 `key/required/secret/format`；命名 DB 资源声明在 `runtime_bindings.databases.<name>` 且格式固定为 `db_config`，命名 Redis 资源声明在 `runtime_bindings.redis.<name>` 且格式固定为 `redis_config`。结构值只在 RuntimeContext 内存中使用并深层只读/复制隔离；`production` 必须为 false；非本机 origin 必须命中 `runtime_bindings.allowed_origins` 指向的白名单。
+
+运行值来源优先级固定为：① canonical `docs/test-config.md` 目标环境中 `secret=false` binding 的稳定 `value`；② `.panda-api-test-agent/local/secrets/environments/<environment-id>.secret.json` 中包已声明的 Secret；③ 当前 run bridge 中同名 Secret，覆盖持久 Secret；④可信宿主显式传入的非敏感 `runtime_values`，覆盖 config value。`runtime_values` 不得携带 Secret；所有来源中的未声明 key 均拒绝。缺失值由 RuntimeContext preflight 按 `required` 判定。
 
 ## 需求追踪
 
@@ -315,7 +338,7 @@ Runner 在发送请求前必须：
 
 - `oracle_id`：稳定标识。
 - `kind: "db"`、`oracle_type: "db"`。
-- `binding`：`runtime_bindings` 中的连接串绑定名；连接串属于 Secret，只经 RuntimeContext 内存注入，不得写入包或证据。
+- `binding`：`runtime_bindings.databases.<name>.key` 指向的绑定名；运行值兼容旧 DSN 字符串和结构化 `db_config`。结构化配置至少声明 `driver`（`sqlite|mysql|postgresql`）及对应连接字段，也可用 `dsn`；执行器只在内存构造驱动参数/DSN，不回写包、配置或其他文件。连接信息属于 Secret，只经 RuntimeContext 注入，不得写入包或证据。
 - `statement`：单条 `SELECT`；必须包含 `WHERE`，必须显式列字段（禁止 `SELECT *`），禁止注释、多语句、分号拼接及任何数据变更关键字（INSERT/UPDATE/DELETE/DDL/PRAGMA/ATTACH/INTO OUTFILE 等）。`${var}` 占位符在执行期以安全字面量替换（字符串自动加引号转义，未知变量报错）。
 - `max_rows`：1..500，默认 100；结果集超限记 `error`，不得静默截断。
 - `assertions`：`source` 仅允许 `row_count`、`scalar`、`row[<index>].<column>`；算子复用 Runner 词表，`row_count` 不得使用 `exists/all_present/contains`。
@@ -326,9 +349,24 @@ Runner 在发送请求前必须：
 - 数据不符 → 断言 `failed`，计入用例事实；
 - 结果集超限或未知变量 → `error`；
 - SQLite 以 read-only URI 打开；驱动层即只读，任何写语句在声明层已被拒绝；
-- 证据写入 `evidence/oracle-<id>.json`，行数据按列名敏感级别掩码，Secret 值全局替换为 `[REDACTED]`。
+- 证据写入 `evidence/oracle-<id>.json`，行数据按原样写入，不做掩码或 Secret 替换。
 
-Redis、消息队列与日志/轨迹查询 Oracle 尚未内建执行器；声明存在但无对应执行能力时，任务不得被调度为可执行，结果保持 `not_run`/`not_enabled`，不得包装为通过。
+## Redis Oracle（只读）
+
+统一 Run 中 Redis 核对通过 `oracle` 类型任务声明（`oracle_type: "redis"`），由可信宿主向 `slice_executor` 注入 `scripts/composite_oracle_executor.py`，再分派到 `scripts/redis_oracle.py`。既有 `run_pipeline` 继续用于旧 HTTP 直跑，不直接接管 unified run。
+
+声明字段：
+
+- `oracle_id`、`kind: "redis"`、`oracle_type: "redis"`。
+- `binding`：`runtime_bindings.redis.<name>.key` 指向的 `redis_config` 绑定名；可包含 `url`/`dsn`，或 `host/port/db/username/password` 等驱动参数，均只在内存使用。
+- `command`：仅允许 `GET/MGET/EXISTS/TYPE/TTL/PTTL/HGET/HMGET/HGETALL/SCARD/SMEMBERS/ZSCORE/ZRANGE/LRANGE`；写命令、`KEYS`、`EVAL/EVALSHA` 和其他未列命令全部在编译期拒绝。
+- `args`：非空标量列表，支持 `${var}` 运行时变量。
+- `max_items`：1..1000，默认 100；`max_bytes`：1..10485760，默认 1048576；超限记 `error`，不得静默截断。
+- `assertions`：算子复用 Runner；`source` 支持 `result|value|item_count|result[index]|item[index]|field.<name>`。
+
+绑定缺失、连接失败或 Redis driver 缺失返回 `not_enabled`，数据不符返回 `failed`。证据写入 `evidence/oracle-<id>.json`，Redis 结果按原样记录，不改变当前 Oracle 证据策略。
+
+消息队列与日志/轨迹查询 Oracle 尚未内建执行器；未知 `oracle_type` 或旧 free-form Oracle 保持现有兼容，但不得标记 `builtin_oracle_executor`，也不得误走 DB/Redis 内建执行器。声明存在但无对应执行能力时，结果保持 `not_run`/`not_enabled`，不得包装为通过。
 
 ## 用例要求
 
@@ -345,7 +383,7 @@ Redis、消息队列与日志/轨迹查询 Oracle 尚未内建执行器；声明
 
 ## RuntimeContext 运行时绑定
 
-RuntimeContext 2.0 仅存在于单次运行内存中，不属于 TestPackage。它必须包含与包一致的 `environment_id`，并由可信宿主以显式 Python 对象构造。实际 URL、Token、Cookie 和其他 Secret 不得进入 package、argv、stdin、result、evidence、报告、`os.environ` 或任意普通临时文件。唯一例外是 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 的 Host-private ephemeral secret file：只允许包含当前包已声明为 Secret 的 binding，必须绑定 run ID、environment ID、当前包指纹、`single_use=true` 和不超过 10 分钟的 TTL；可信宿主按精确 run ID 原子认领，禁止目录扫描、glob、任意路径与历史回退，并在构造 RuntimeContext 前删除，删除失败必须 fail-closed。Runner 只能读取包声明的 binding key；未声明值、Secret 分类不一致、必填值缺失或格式非法时，必须在创建 HTTP Executor 前阻断。
+RuntimeContext 2.0 仅存在于单次运行内存中，不属于 TestPackage。它必须包含与包一致的 `environment_id`，并由可信宿主以显式 Python 对象构造；映射、列表等结构运行值必须复制隔离并转换为深层只读视图。实际 URL、Token、Cookie 和其他 Secret 不得进入 package、argv、stdin、result、报告或 `os.environ`。用户已授权 DB/Redis/认证 Secret 明文进入项目本机 `.panda-api-test-agent/local/secrets/environments/<environment-id>.secret.json`：该持久 Store 只能由可信宿主使用，必须校验项目根和安全 `environment_id`，只接受当前包声明为 `secret=true` 的 binding，原子替换写入，按包目标环境精确读取，防路径逃逸，不进行目录扫描、glob 或历史回退。`.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 继续作为 Host-private ephemeral run bridge：只允许当前包已声明的 Secret，绑定 run ID、environment ID、当前包指纹、`single_use=true` 和不超过 10 分钟的 TTL；可信宿主按精确 run ID 原子认领并在构造 RuntimeContext 前删除，删除失败 fail-closed。可信宿主必须先完成 package execution preflight，再读取任何持久或 run Secret。Runner 只能读取包声明的 binding key；未声明值、Secret 分类不一致、必填值缺失或格式非法时，必须在创建 HTTP Executor 前阻断。
 
 ## 副作用
 
@@ -376,9 +414,10 @@ execute_test_package(
     package_path,
     run_dir,
     report_path,
-    runtime_values=runtime_values,
+    runtime_values=non_secret_runtime_overrides,
+    local_secret_run_id=optional_run_id,
     outcome_path=host_outcome_path,
 )
 ```
 
-可信宿主在内存中调用 `build_runtime_context`，再进入 `run_pipeline(..., runtime_context=context)`。可选 `host_outcome` 只记录绑定名称、非敏感 Context 元数据、阶段耗时、停止阶段和产物路径，不保存运行值。`trusted_host.py`、`run_pipeline.py` 与 `runner.py` 均不提供携带凭据的命令行入口；pipeline 和 Runner 的 CLI 默认拒绝执行。校验器和报告器只读取脱敏后的结果文件，不接触运行时 Secret。新包必须使用 TestPackage 2.1、`environment.runtime_bindings` 和完整画像绑定；旧包不迁移、不允许新执行或晋级。
+可信宿主在内存中调用 `build_runtime_context`，再进入 `run_pipeline(..., runtime_context=context)`。可选 `host_outcome` 只记录绑定名称、非敏感 Context 元数据、阶段耗时、停止阶段和产物路径，不保存运行值。`trusted_host.py`、`run_pipeline.py` 与 `runner.py` 均不提供携带凭据的命令行入口；pipeline 和 Runner 的 CLI 默认拒绝执行。校验器和报告器读取结果文件，其中报文与运行值按原样保留。新包必须使用 TestPackage 2.1、`environment.runtime_bindings` 和完整画像绑定；旧包不迁移、不允许新执行或晋级。

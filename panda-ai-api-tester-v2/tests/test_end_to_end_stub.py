@@ -20,6 +20,7 @@ SCRIPTS_DIR = SKILL_DIR / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import runner  # noqa: E402
+from environment_secret_store import write_environment_secrets  # noqa: E402
 from trusted_host import execute_test_package  # noqa: E402
 
 TOKEN = "stub-bearer-token-must-not-leak"
@@ -124,11 +125,16 @@ class EndToEndContractTests(unittest.TestCase):
         return profile
 
     def _test_config(self, temp_dir):
-        config = Path(temp_dir) / "test-config.md"
+        config = Path(temp_dir) / "docs" / "test-config.md"
+        config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(
             "# Project test config\n\n```yaml test-config\n"
             'metadata:\n  schema_version: "2.1"\n  project_id: stub-workspace\n  config_revision: 1\n'
-            "environments:\n  local-stub:\n    production: false\n```\n",
+            "environments:\n  local-stub:\n    production: false\n    runtime_bindings:\n"
+            "      base_url:\n        key: STUB_BASE_URL\n        required: true\n        secret: false\n        format: url\n"
+            "      allowed_origins:\n        key: STUB_ALLOWED_ORIGINS\n        required: true\n        secret: false\n        format: origin_list\n"
+            "      read_only_operations:\n        key: STUB_READ_ONLY_OPERATIONS\n        required: true\n        secret: false\n        format: operation_list\n"
+            "      auth:\n        credential:\n          key: STUB_BEARER_TOKEN\n          required: true\n          secret: true\n          format: string\n```\n",
             encoding="utf-8",
         )
         return config
@@ -290,8 +296,10 @@ class EndToEndContractTests(unittest.TestCase):
 
     def _run(self, temp_dir, base_url, token):
         package = self._package(temp_dir, base_url)
-        package_path = Path(temp_dir) / "package.json"
+        package_path = Path(temp_dir) / ".panda-api-test-agent" / "runs" / "RUN-STUB" / "package.json"
+        package_path.parent.mkdir(parents=True, exist_ok=True)
         package_path.write_text(json.dumps(package, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_environment_secrets(package_path, package, {"STUB_BEARER_TOKEN": token})
         run_dir = Path(temp_dir) / "run"
         report_path = Path(temp_dir) / "report.html"
         outcome_path = Path(temp_dir) / "host-outcome.json"
@@ -303,7 +311,6 @@ class EndToEndContractTests(unittest.TestCase):
                 "STUB_BASE_URL": base_url,
                 "STUB_ALLOWED_ORIGINS": base_url,
                 "STUB_READ_ONLY_OPERATIONS": READ_ONLY,
-                "STUB_BEARER_TOKEN": token,
             },
             context_id="ctx-stub-e2e",
             outcome_path=outcome_path,
@@ -338,7 +345,8 @@ class EndToEndContractTests(unittest.TestCase):
             self.assertIn("validation", outcome["stages"]["pipeline"]["details"]["stages"])
             self.assertIn("report", outcome["stages"]["pipeline"]["details"]["stages"])
 
-    def test_runtime_values_never_reach_artifacts(self):
+    def test_runtime_values_visible_in_run_artifacts(self):
+        # 报文不再遮蔽：运行时值按原样出现在运行产物中，本用例只校验其可定位。
         with tempfile.TemporaryDirectory() as temp_dir, _StubEnvironment() as stub:
             outcome, run_dir, report_path, outcome_path = self._run(temp_dir, stub.base_url, TOKEN)
             self.assertEqual(outcome["status"], "completed", outcome)
@@ -346,20 +354,23 @@ class EndToEndContractTests(unittest.TestCase):
             artifacts = [run_dir / "result.json", report_path, outcome_path]
             artifacts.extend(sorted((run_dir / "evidence").glob("*.json")))
             artifacts.append(run_dir / "progress.json")
+            hits = []
             for path in artifacts:
                 if not path.is_file():
                     continue
                 text = path.read_text(encoding="utf-8")
-                self.assertNotIn(TOKEN, text, f"runtime secret leaked into {path}")
+                if TOKEN in text:
+                    hits.append(path.name)
+            self.assertTrue(hits, "运行时值应原样出现在至少一份运行产物中")
 
-    def test_basic_scheme_is_redacted_in_nested_evidence(self):
+    def test_basic_scheme_preserved_in_evidence(self):
         payload = {
             "request_headers": {"Authorization": BASIC_VALUE},
             "message": f"Authorization: {BASIC_VALUE}",
         }
-        safe = runner.redact(payload)
-        self.assertEqual(safe["request_headers"]["Authorization"], "***REDACTED***")
-        self.assertEqual(safe["message"], "Authorization: Basic ***REDACTED***")
+        safe = runner.sanitize_exchange(payload)
+        self.assertEqual(safe["request_headers"]["Authorization"], BASIC_VALUE)
+        self.assertEqual(safe["message"], f"Authorization: {BASIC_VALUE}")
 
     def test_invalid_token_blocks_before_business_cases(self):
         with tempfile.TemporaryDirectory() as temp_dir, _StubEnvironment() as stub:

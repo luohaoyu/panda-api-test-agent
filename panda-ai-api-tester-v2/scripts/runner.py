@@ -21,12 +21,6 @@ from runtime_context import RuntimeContext, RuntimeContextError, auth_config, au
 
 
 SUPPORTED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
-SENSITIVE_KEYS = {
-    "authorization", "cookie", "setcookie", "token", "accesstoken", "refreshtoken",
-    "password", "secret", "clientsecret", "apikey", "xapikey", "phone", "principal",
-    "email", "name", "address", "street", "area", "remarks", "pickupcode",
-    "verificationpin", "waybillno", "corderno", "requestid", "foursegmentcode",
-}
 PRODUCTION_HOST_HINTS = {"prod", "production", "live"}
 WRITE_METHODS = {"POST", "PUT", "PATCH"}
 DESTRUCTIVE_METHODS = {"DELETE"}
@@ -362,64 +356,8 @@ def canonical_key(value):
     return re.sub(r"[^a-z0-9]", "", str(value).lower())
 
 
-def is_sensitive_key(value):
-    key = canonical_key(value)
-    if key in SENSITIVE_KEYS:
-        return True
-    return any(
-        key.endswith(token) or key.startswith(token)
-        for token in ("authorization", "cookie", "token", "password", "secret", "apikey", "phone", "email", "address", "street", "area", "remarks", "name", "code", "pin", "requestid", "waybill")
-    )
 
 
-def redact_url(value):
-    try:
-        parsed = urllib.parse.urlsplit(value)
-    except ValueError:
-        return value
-    if not parsed.scheme or not parsed.netloc:
-        return value
-    query = []
-    for key, item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
-        query.append((key, "***REDACTED***" if canonical_key(key) in SENSITIVE_KEYS else item))
-    netloc = parsed.hostname or ""
-    if parsed.port:
-        netloc += f":{parsed.port}"
-    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, urllib.parse.urlencode(query), ""))
-
-
-def redact_embedded_urls(value):
-    return re.sub(r"https?://[^\s\"'<>]+", lambda match: redact_url(match.group(0)), value)
-
-
-def redact(value, key=None, secrets=None):
-    secrets = [item for item in (secrets or []) if item]
-    if key and is_sensitive_key(key):
-        return "***REDACTED***"
-    if isinstance(value, dict):
-        return {item_key: redact(item_value, item_key, secrets) for item_key, item_value in value.items()}
-    if isinstance(value, list):
-        return [redact(item, secrets=secrets) for item in value]
-    if isinstance(value, str):
-        result = redact_url(value) if value.startswith(("http://", "https://")) else redact_embedded_urls(value)
-        result = re.sub(
-            r"(?i)\b(basic|bearer)\s+[^\s,;]+",
-            lambda match: match.group(1).title() + " ***REDACTED***",
-            result,
-        )
-        for secret in secrets:
-            # Avoid corrupting semantic enum/status values when a test fixture
-            # uses a very short secret such as "pass". Sensitive fields are
-            # already redacted by key; substring replacement is reserved for
-            # secrets long enough to be unambiguously sensitive.
-            if len(secret) >= 8:
-                result = result.replace(secret, "***REDACTED***")
-            elif result == secret:
-                result = "***REDACTED***"
-        if len(result) > 4000:
-            return result[:4000] + "...[TRUNCATED]"
-        return result
-    return value
 
 
 def json_path_get(document, path):
@@ -442,55 +380,13 @@ def json_path_get(document, path):
     return current
 
 
-def redact_json_paths(document, paths):
-    result = deepcopy(document)
-    for path in paths or []:
-        if not isinstance(path, str) or not path.startswith("$."):
-            continue
-        tokens = [(name, int(index) if index else None) for name, index in re.findall(r"([^.[\]]+)|\[(\d+)\]", path[2:])]
-        current = result
-        for position, (name, index) in enumerate(tokens):
-            last = position == len(tokens) - 1
-            if name:
-                if not isinstance(current, dict) or name not in current:
-                    break
-                if last:
-                    current[name] = "***REDACTED***"
-                else:
-                    current = current[name]
-            else:
-                if not isinstance(current, list) or index >= len(current):
-                    break
-                if last:
-                    current[index] = "***REDACTED***"
-                else:
-                    current = current[index]
-    return result
 
-
-def sanitize_exchange(exchange, sensitive_json_paths):
+def sanitize_exchange(exchange, sensitive_json_paths=None):
     safe = deepcopy(exchange)
     if safe.get("response_json") is not None:
-        safe["response_json"] = redact_json_paths(safe["response_json"], sensitive_json_paths)
         safe["response_body"] = deepcopy(safe["response_json"])
     return safe
 
-
-def sanitize_assertions(assertions, sensitive_json_paths=None):
-    sanitized = []
-    for assertion in assertions:
-        item = deepcopy(assertion)
-        path = str(item.get("path", ""))
-        terminal = re.split(r"[.\[\]'\"]+", path)[-1] if path else ""
-        if canonical_key(terminal) in SENSITIVE_KEYS or path in set(sensitive_json_paths or []):
-            passed = item.get("status") == "passed"
-            item["original_operator"] = item.get("operator")
-            item["operator"] = "equals"
-            item["expected"] = True
-            item["actual"] = passed
-            item["redacted"] = True
-        sanitized.append(item)
-    return sanitized
 
 
 def assertion_passes(operator, expected, actual):
@@ -858,16 +754,15 @@ class AssertionEngine:
 
 
 class EvidenceWriter:
-    def __init__(self, run_dir, secrets=None):
+    def __init__(self, run_dir):
         self.run_dir = Path(run_dir).resolve()
         self.evidence_dir = self.run_dir / "evidence"
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
-        self.secrets = secrets if secrets is not None else []
 
     def write(self, identifier, payload):
         name = slug(identifier) + ".json"
         path = self.evidence_dir / name
-        data = json.dumps(redact(payload, secrets=self.secrets), ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+        data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
         path.write_bytes(data)
         return f"evidence/{name}", sha256_bytes(data)
 
@@ -922,8 +817,6 @@ class FixtureManager:
             try:
                 value = json_path_get(response_json, path)
                 self.resolver.set(variable, value)
-                if variable.startswith("secret_") and isinstance(value, str) and len(value) >= 4:
-                    self.evidence.secrets.append(value)
             except (KeyError, ValueError, TypeError) as exc:
                 raise RunnerError(f"fixture extraction failed for {variable} from {path}") from exc
 
@@ -952,8 +845,6 @@ class TeardownManager:
             for variable, path in action.get("cleanup_extract", {}).items():
                 value = json_path_get(response_json, path)
                 self.resolver.set(variable, value)
-                if variable.startswith("secret_") and isinstance(value, str) and len(value) >= 4:
-                    self.evidence.secrets.append(value)
             action["bound"] = True
         except (KeyError, ValueError, TypeError) as exc:
             action["cleanup_error"] = f"cleanup extraction failed for {variable} from {path}: {exc}"
@@ -999,11 +890,11 @@ class TeardownManager:
                 ref, digest = self.evidence.write(f"teardown-{case_id}", {"case_id": case_id, "exchange": exchange, "verification_exchange": verify_exchange, "verification_assertions": verify_assertions, "status": status})
                 record = {"case_id": case_id, "status": status, "verified": verified, "evidence_ref": ref, "evidence_sha256": digest}
                 if status != "passed":
-                    pending.append({"case_id": case_id, "object_ref": redact(object_ref or item.get("object_ref"), secrets=self.evidence.secrets), "reason": f"HTTP {exchange['status']}"})
+                    pending.append({"case_id": case_id, "object_ref": object_ref or item.get("object_ref"), "reason": f"HTTP {exchange['status']}"})
             except Exception as exc:
-                actual = redact(str(exc), secrets=self.evidence.secrets)
+                actual = str(exc)
                 record = {"case_id": case_id, "status": "failed", "actual": actual}
-                pending.append({"case_id": case_id, "object_ref": redact(object_ref or item.get("object_ref"), secrets=self.evidence.secrets), "reason": actual})
+                pending.append({"case_id": case_id, "object_ref": object_ref or item.get("object_ref"), "reason": actual})
             action_results.append(record)
         return {"status": "failed" if pending else "passed", "pending_objects": pending, "actions": action_results}
 
@@ -1117,15 +1008,13 @@ class GateExecutor:
             assertions = AssertionEngine().evaluate(self.resolver.resolve(gate.get("assertions") or {"http_status": [200], "business_code": {"path": "$.code", "equals": 200}, "required_fields": ["$.code"]}), exchange)
             required_assertions = [item for item in assertions if item.get("required", True)]
             passed = bool(required_assertions) and all(item["status"] == "passed" for item in required_assertions)
-            sensitive_paths = gate.get("sensitive_json_paths") or []
-            assertions = sanitize_assertions(assertions, sensitive_paths)
-            payload = {"gate_id": gate_id, "exchange": sanitize_exchange(exchange, sensitive_paths), "assertions": assertions}
+            payload = {"gate_id": gate_id, "exchange": sanitize_exchange(exchange), "assertions": assertions}
             ref, digest = self.evidence.write(f"gate-{gate_id}", payload)
             result = self._gate_result(gate_id, gate.get("name", gate_id), "passed" if passed else "failed", gate.get("classification", "environment"), f"HTTP {exchange['status']}", [ref], digest, blocking=gate.get("blocking", True))
             result["runtime"] = True
             return result
         except Exception as exc:
-            payload = {"gate_id": gate_id, "error": redact(str(exc), secrets=self.evidence.secrets), "assertions": []}
+            payload = {"gate_id": gate_id, "error": str(exc), "assertions": []}
             ref, digest = self.evidence.write(f"gate-{gate_id}", payload)
             result = self._gate_result(gate_id, gate.get("name", gate_id), "error", "environment", payload["error"], [ref], digest, blocking=gate.get("blocking", True))
             result["runtime"] = True
@@ -1140,15 +1029,14 @@ class GateExecutor:
 
 
 class ResultWriter:
-    def __init__(self, run_dir, secrets=None):
+    def __init__(self, run_dir):
         self.run_dir = Path(run_dir).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.secrets = secrets if secrets is not None else []
 
     def write(self, result):
         path = self.run_dir / "result.json"
         temporary = self.run_dir / ".result.json.tmp"
-        safe_result = redact(result, secrets=self.secrets)
+        safe_result = result
         temporary.write_text(json.dumps(safe_result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.replace(path)
         return path
@@ -1174,13 +1062,12 @@ class ApiTestRunner:
         initial = {"run_id": f"run-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"}
         self.resolver = VariableResolver(initial, self.allowed_bindings, runtime_context)
         self.auth = AuthInjector(package, self.resolver)
-        secrets = runtime_context.redaction_values()
         self.http = HttpExecutor(self.base_url, self.environment.get("timeout_seconds", 10), self.environment.get("max_response_bytes", 1024 * 1024), self.auth)
-        self.evidence = EvidenceWriter(self.run_dir, secrets)
+        self.evidence = EvidenceWriter(self.run_dir)
         self.teardown = TeardownManager(self.resolver, self.http, self.evidence)
         self.fixtures = FixtureManager(self.resolver, self.http, self.evidence, self.teardown)
         self.assertions = AssertionEngine()
-        self.result_writer = ResultWriter(self.run_dir, secrets)
+        self.result_writer = ResultWriter(self.run_dir)
         self.write_attempt_risks = []
         self.residual_risks = []
         self.plan_fingerprint = None
@@ -1246,7 +1133,7 @@ class ApiTestRunner:
                 if fixture_records:
                     gate_results.append({"gate_id": "GATE-FIXTURES", "name": "测试夹具", "status": "passed", "classification": "test_case", "actual": f"prepared {len(fixture_records)} fixture(s)", "evidence_refs": [item["evidence_ref"] for item in fixture_records if item.get("evidence_ref")]})
             except Exception as exc:
-                gate = {"gate_id": "GATE-FIXTURES", "name": "测试夹具", "status": "error", "classification": "test_case", "actual": redact(str(exc), secrets=self.evidence.secrets), "evidence_refs": []}
+                gate = {"gate_id": "GATE-FIXTURES", "name": "测试夹具", "status": "error", "classification": "test_case", "actual": str(exc), "evidence_refs": []}
                 gate_results.append(gate)
                 case_results = [
                     self._not_run_case(
@@ -1307,14 +1194,14 @@ class ApiTestRunner:
             "mode": self.package.get("mode"),
             "execution_profile": self.package.get("execution_profile"),
             "plan": {"plan_fingerprint": self.plan_fingerprint, "title": (self.package.get("plan") or {}).get("title") or self.package.get("title")},
-            "feasibility": redact(self.package.get("feasibility") or {}, secrets=self.evidence.secrets),
-            "package_build": redact(self.package.get("package_build") or {}, secrets=self.evidence.secrets),
+            "feasibility": self.package.get("feasibility") or {},
+            "package_build": self.package.get("package_build") or {},
             "review": {key: value for key, value in self.review.items() if key not in {"comment", "findings"}},
             "contract": primary_contract_binding(self.contract_bindings) or (self.package.get("contract") or {}),
             "contracts": self.contract_bindings,
             "test_config": self.package.get("test_config") or {},
-            "project": redact(self.package.get("project") or {}, secrets=self.evidence.secrets),
-            "environment": {"environment_id": self.environment.get("environment_id", "unknown"), "base_url": redact_url(self.base_url), "production": bool(self.environment.get("production", False)), "runtime_status": self._environment_runtime_status(gate_results, case_results), "runtime_context": self.runtime_context.metadata()},
+            "project": self.package.get("project") or {},
+            "environment": {"environment_id": self.environment.get("environment_id", "unknown"), "base_url": self.base_url, "production": bool(self.environment.get("production", False)), "runtime_status": self._environment_runtime_status(gate_results, case_results), "runtime_context": self.runtime_context.metadata()},
             "started_at": started_at,
             "finished_at": now_iso(),
             "gate_results": gate_results,
@@ -1705,7 +1592,7 @@ class ApiTestRunner:
             self.http.with_auth_mode(None)
             auth_observation = "failed" if exchange.get("status") in {401, 403} else "verified"
             if case.get("side_effect") == "write" and waiver is None and not case.get("teardown"):
-                self.residual_risks.append({"case_id": case_id, "object_ref": redact(case.get("object_ref"), secrets=self.evidence.secrets), "reason": "普通非生产写入未配置 teardown；残留对象需人工处置。", "risk": "accepted_pending_cleanup"})
+                self.residual_risks.append({"case_id": case_id, "object_ref": case.get("object_ref"), "reason": "普通非生产写入未配置 teardown；残留对象需人工处置。", "risk": "accepted_pending_cleanup"})
                 step("register_residual_risk", "passed", object_ref=case.get("object_ref"), reason="no teardown configured")
             if action is not None:
                 self.teardown.bind_response(action, exchange.get("response_json"))
@@ -1723,20 +1610,18 @@ class ApiTestRunner:
                     self.resolver.resolve(verification.get("assertions")), verification_exchange
                 )
                 assertions.extend(verification_assertions)
-                step("read_only_verification", "passed" if all(item.get("status") == "passed" for item in verification_assertions if item.get("required", True)) else "failed", method=verification_exchange.get("method"), url=redact_url(verification_exchange.get("url", "")), http_status=verification_exchange.get("status"))
+                step("read_only_verification", "passed" if all(item.get("status") == "passed" for item in verification_assertions if item.get("required", True)) else "failed", method=verification_exchange.get("method"), url=verification_exchange.get("url", ""), http_status=verification_exchange.get("status"))
                 if not primary_passed:
                     self.write_attempt_risks.append({"case_id": case_id, "reason": "rejection assertion failed; read-only verification executed"})
             required = [item for item in assertions if item.get("required", True)]
             passed = bool(required) and all(item["status"] == "passed" for item in required)
-            sensitive_paths = case.get("sensitive_json_paths") or []
             if passed:
                 self._extract(case.get("extract") or {}, exchange.get("response_json"), case_id)
                 if case.get("extract"):
                     step("extract_variables", "passed", variables=sorted(case.get("extract")))
-            assertions = sanitize_assertions(assertions, sensitive_paths)
-            evidence_payload = {"case_id": case_id, "name": name, "exchange": sanitize_exchange(exchange, sensitive_paths), "verification_exchange": sanitize_exchange(verification_exchange, []) if verification_exchange else None, "assertions": assertions}
+            evidence_payload = {"case_id": case_id, "name": name, "exchange": sanitize_exchange(exchange), "verification_exchange": sanitize_exchange(verification_exchange) if verification_exchange else None, "assertions": assertions}
             evidence_ref, digest = self.evidence.write(f"case-{case_id}", evidence_payload)
-            step("http_exchange", "passed", method=exchange.get("method"), url=redact_url(exchange.get("url", "")), http_status=exchange.get("status"), elapsed_ms=exchange.get("elapsed_ms"), evidence_refs=[evidence_ref], evidence_sha256=digest)
+            step("http_exchange", "passed", method=exchange.get("method"), url=exchange.get("url", ""), http_status=exchange.get("status"), elapsed_ms=exchange.get("elapsed_ms"), evidence_refs=[evidence_ref], evidence_sha256=digest)
             if waiver is not None:
                 step("cleanup_waiver", "passed", waiver_id=waiver.get("waiver_id"), object_ref=case.get("object_ref"), data_tag=waiver.get("data_tag"), reason=waiver.get("reason"), residual_risk=waiver.get("residual_risk"))
             for assertion in assertions:
@@ -1779,8 +1664,8 @@ class ApiTestRunner:
             if case.get("side_effect") == "write_attempt" and request_delivery in {"confirmed", "unknown"}:
                 self.write_attempt_risks.append({"case_id": case_id, "reason": f"write_attempt execution error with request_delivery={request_delivery}; side effect requires review"})
             cleanup_registered = any(item.get("case_id") == case_id for item in self.teardown.actions)
-            step("case_error", "error", actual=redact(str(exc), secrets=self.evidence.secrets), request_delivery=request_delivery)
-            return {"case_id": case_id, "name": name, "status": "error", "classification": "environment" if isinstance(exc, RunnerError) else "test_case", "request_sent": request_sent, "request_delivery": request_delivery, "auth_observation": "failed" if request_delivery == "confirmed" and getattr(exc, "status", None) in {401, 403} else ("verified" if request_delivery == "confirmed" else None), "scope": "approved", "cleanup_registered": cleanup_registered, "expected": "request executes and deterministic assertions complete", "actual": redact(str(exc), secrets=self.evidence.secrets), "assertions": [], "evidence_refs": [], "blocked_by": [], "requirement_refs": list(case.get("requirement_refs") or []), "business_rule_refs": list(case.get("business_rule_refs") or []), "scenario_refs": list(case.get("scenario_refs") or []), "scenario_type": case.get("scenario_type", "positive"), "execution_trace": {"status": "error", "steps": steps}}
+            step("case_error", "error", actual=str(exc), request_delivery=request_delivery)
+            return {"case_id": case_id, "name": name, "status": "error", "classification": "environment" if isinstance(exc, RunnerError) else "test_case", "request_sent": request_sent, "request_delivery": request_delivery, "auth_observation": "failed" if request_delivery == "confirmed" and getattr(exc, "status", None) in {401, 403} else ("verified" if request_delivery == "confirmed" else None), "scope": "approved", "cleanup_registered": cleanup_registered, "expected": "request executes and deterministic assertions complete", "actual": str(exc), "assertions": [], "evidence_refs": [], "blocked_by": [], "requirement_refs": list(case.get("requirement_refs") or []), "business_rule_refs": list(case.get("business_rule_refs") or []), "scenario_refs": list(case.get("scenario_refs") or []), "scenario_type": case.get("scenario_type", "positive"), "execution_trace": {"status": "error", "steps": steps}}
 
     def _waived_cleanup_cases(self, case_results):
         waived = []
@@ -1807,8 +1692,6 @@ class ApiTestRunner:
             try:
                 value = json_path_get(response_json, path)
                 self.resolver.set(variable, value)
-                if variable.startswith("secret_") and isinstance(value, str) and len(value) >= 4:
-                    self.evidence.secrets.append(value)
             except (KeyError, ValueError, TypeError) as exc:
                 raise RunnerError(f"case {case_id} extraction failed for {variable} from {path}") from exc
 

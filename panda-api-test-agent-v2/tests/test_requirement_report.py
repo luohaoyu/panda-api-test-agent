@@ -50,12 +50,48 @@ class RequirementReportTests(unittest.TestCase):
         errors = report.validate(data)
         self.assertTrue(any("business_execution" in item for item in errors))
 
-    def test_render_uses_three_rates(self):
+    def test_render_uses_ac_rates_and_interface_execution_coverage(self):
         body = report.render(sample())
-        self.assertIn("执行触达率", body)
+        self.assertIn("验收项触达率", body)
         self.assertIn("完整覆盖率", body)
         self.assertIn("验收通过率", body)
+        self.assertIn("接口执行覆盖", body)
         self.assertIn("50.0%", body)
+
+    def test_information_architecture_is_decision_first(self):
+        data = sample()
+        data.update({
+            "report_id": "AR-REQ-1-CURRENT",
+            "release_recommendation": "暂不发布；补齐证据后复核",
+            "aggregation": {"run_count": 2, "current": {"run_id": "run-2", "status": "inconclusive"}},
+        })
+        body = report.render(data)
+        headings = ["总体结论", "1. 需求覆盖", "2. 需求涉及接口", "3. 场景、用例与检查证据", "4. 问题、缺口与残留风险", "5. 下一步", "证据与降级索引"]
+        positions = [body.index(value) for value in headings]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("AR-REQ-1-CURRENT", body)
+        self.assertIn("聚合运行：2", body)
+        self.assertIn("暂不发布；补齐证据后复核", body)
+        self.assertIn("不构造执行步骤或接口顺序", body)
+
+    def test_partial_ac_shows_validation_boundary_and_external_evidence(self):
+        data = sample()
+        data["acceptance_items"][1].update({
+            "interface_verifiability": "partial",
+            "verifiability_reason": "接口只能验证后端状态",
+            "interface_scope": ["后端状态"],
+            "non_interface_scope": ["页面展示"],
+            "recommended_validation_layers": ["UI"],
+            "external_evidence": {"status": "missing", "layers": ["UI"], "refs": []},
+            "gaps": ["缺少 UI 截图"],
+        })
+        body = report.render(data)
+        for value in ("接口只能验证后端状态", "接口内：后端状态", "接口外：页面展示", "缺少 UI 截图"):
+            self.assertIn(value, body)
+
+    def test_verdict_has_status_specific_class(self):
+        body = report.render(sample())
+        self.assertIn('class="verdict v-FAIL"', body)
 
     def test_render_is_byte_deterministic(self):
         self.assertEqual(report.render(sample()), report.render(sample()))

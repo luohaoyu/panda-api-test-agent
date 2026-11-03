@@ -22,7 +22,11 @@ class AssetValidationError(ValueError):
 
 CONFIG_BLOCK = re.compile(r"```yaml\s+test-config\s*\n(?P<body>[\s\S]*?)\n```", re.IGNORECASE)
 PROFILE_BLOCK = re.compile(r"```yaml\s+interface-profile-governance\s*\n(?P<body>[\s\S]*?)\n```", re.IGNORECASE)
-SECRET_LITERAL = re.compile(r"(?im)^\s*(?:token|password|secret|cookie|authorization|api[_-]?key)\s*:\s*([^$\n][^\n]*)$")
+SECRET_LITERAL = re.compile(
+    r"(?im)^[ \t]*(?:token|password|cookie|authorization|api[_-]?key)[ \t]*:[ \t]*([^$\n][^\n]*)$"
+)
+SECRET_FIELD = re.compile(r"(?im)^[ \t]*secret[ \t]*:[ \t]*(?P<value>[^\n#]+)")
+LEGACY_ENV_FIELD = re.compile(r"(?m)^\s*[A-Za-z0-9_.-]+_env\s*:")
 
 
 def _scalar(body: str, field: str) -> str | None:
@@ -35,9 +39,72 @@ def extract_config(text: str) -> str:
     if len(blocks) != 1:
         raise AssetValidationError("exactly one yaml test-config block is required")
     body = blocks[0].group("body")
-    if "_env" in body:
+    if LEGACY_ENV_FIELD.search(body):
         raise AssetValidationError("legacy _env fields are forbidden")
     return body
+
+
+def _yaml_scalar_map(body: str) -> dict[tuple[str, ...], str]:
+    """Extract scalar paths from the documented YAML subset without loading YAML."""
+    scalars: dict[tuple[str, ...], str] = {}
+    stack: list[tuple[int, str]] = []
+    for raw_line in body.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith(("#", "- ")):
+            continue
+        match = re.match(r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_${}.-]+):(?:\s*(?P<value>.*?))?\s*$", raw_line)
+        if not match:
+            continue
+        indent = len(match.group("indent").expandtabs(2))
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        key = match.group("key")
+        path = tuple(item[1] for item in stack) + (key,)
+        value = (match.group("value") or "").split(" #", 1)[0].strip().strip("\"'")
+        if value:
+            scalars[path] = value
+        stack.append((indent, key))
+    return scalars
+
+
+def _validate_runtime_bindings(body: str, errors: list[str]) -> dict[str, int]:
+    scalars = _yaml_scalar_map(body)
+    binding_count = 0
+    stable_value_count = 0
+    secret_ref_count = 0
+    allowed_secret_fields = {"key", "required", "secret", "format", "secret_ref"}
+    for path, secret in scalars.items():
+        if path[-1] != "secret" or "runtime_bindings" not in path:
+            continue
+        binding_count += 1
+        binding_path = path[:-1]
+        if secret not in {"true", "false"}:
+            errors.append(f"{'.'.join(path)} must be true or false")
+            continue
+        direct_fields = {
+            candidate[-1]
+            for candidate in scalars
+            if len(candidate) == len(binding_path) + 1 and candidate[:-1] == binding_path
+        }
+        if secret == "true":
+            if "value" in direct_fields:
+                errors.append(f"{'.'.join(binding_path)}: secret=true forbids value")
+            unsupported = sorted(direct_fields - allowed_secret_fields)
+            if unsupported:
+                errors.append(
+                    f"{'.'.join(binding_path)}: secret=true only permits binding metadata/secret_ref; "
+                    f"unsupported fields: {', '.join(unsupported)}"
+                )
+            if "secret_ref" in direct_fields:
+                secret_ref_count += 1
+        elif "secret_ref" in direct_fields:
+            errors.append(f"{'.'.join(binding_path)}: secret=false forbids secret_ref")
+        elif "value" in direct_fields:
+            stable_value_count += 1
+    return {
+        "runtime_binding_count": binding_count,
+        "stable_non_secret_value_count": stable_value_count,
+        "secret_ref_count": secret_ref_count,
+    }
 
 
 def validate_config(text: str) -> dict[str, Any]:
@@ -54,7 +121,13 @@ def validate_config(text: str) -> dict[str, Any]:
         errors.append("environments is required")
     if not re.search(r"(?m)^safety:\s*$", body):
         errors.append("safety is required")
-    if SECRET_LITERAL.search(body):
+    binding_summary = _validate_runtime_bindings(body, errors)
+    secret_field_literals = [
+        match.group("value").strip()
+        for match in SECRET_FIELD.finditer(body)
+        if match.group("value").strip() not in {"true", "false"}
+    ]
+    if SECRET_LITERAL.search(body) or secret_field_literals:
         errors.append("runtime secrets must be binding metadata or placeholders")
     if errors:
         raise AssetValidationError("; ".join(errors))
@@ -62,7 +135,29 @@ def validate_config(text: str) -> dict[str, Any]:
         "schema_version": "2.1",
         "project_id": _scalar(body, "project_id"),
         "config_revision": int(revision),
+        **binding_summary,
         "block_fingerprint": "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest(),
+    }
+
+
+def validate_config_update(previous_text: str, current_text: str) -> dict[str, Any]:
+    """Validate revision movement for canonical config content changes."""
+    previous = validate_config(previous_text)
+    current = validate_config(current_text)
+    previous_body = extract_config(previous_text)
+    current_body = extract_config(current_text)
+    previous_content = re.sub(r"(?m)^(\s*config_revision:\s*)\d+(\s*(?:#.*)?)$", r"\1<revision>\2", previous_body)
+    current_content = re.sub(r"(?m)^(\s*config_revision:\s*)\d+(\s*(?:#.*)?)$", r"\1<revision>\2", current_body)
+    changed = previous_content != current_content
+    expected_revision = previous["config_revision"] + (1 if changed else 0)
+    if current["config_revision"] != expected_revision:
+        rule = "must increment by one" if changed else "must remain unchanged"
+        raise AssetValidationError(f"metadata.config_revision {rule} for canonical config content")
+    return {
+        "changed": changed,
+        "previous_revision": previous["config_revision"],
+        "config_revision": current["config_revision"],
+        "block_fingerprint": current["block_fingerprint"],
     }
 
 

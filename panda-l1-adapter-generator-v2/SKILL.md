@@ -2,7 +2,7 @@
 name: panda-l1-adapter-generator-v2
 description: 扫描代码、部署与配置资产，创建或增量维护项目级多环境 test-config Schema 2.1 和接口画像。当用户要求接入新工程、重建项目测试配置、增加环境或复核配置漂移时使用。；v2 架构升级版
 agent_created: true
-version: 2.1.0
+version: 2.1.1
 ---
 
 # L1 适配层生成器
@@ -37,14 +37,14 @@ version: 2.1.0
 
 ## Schema 与旧格式
 
-唯一支持 `metadata.schema_version: "2.1"`；运行值仅通过 `runtime_bindings` 声明，旧 `_env` 字段不兼容。
+唯一支持 `metadata.schema_version: "2.1"`。`docs/test-config.md` 是项目唯一 canonical 多环境配置；不得创建并行、需求级或“独立临时 Schema 配置”。旧 `_env` 字段不兼容。
 
 发现旧版需求级 `test-config.md` 时：
 
-1. 标记长期项目配置不可直接消费，不把旧格式当作 Schema 2.1。
-2. 不兼容、不迁移、不猜测旧字段；先根据当前测试目标和可验证证据生成独立的临时 Schema 2.1 运行配置。
-3. 未经明确授权不覆盖或删除旧文件；临时配置不得替代长期项目资产。
-4. 临时配置满足最小运行门禁后，可以继续当前 PROBE/局部 EXECUTE；正式项目配置仍保持 `drafted` 或 `reconfirm_required`。
+1. 标记该文件不可直接消费，不把旧格式当作 Schema 2.1。
+2. 不兼容、不迁移、不猜测旧字段，也不创建替代性的临时 Schema 配置。
+3. 未经明确授权不覆盖或删除旧文件；根据当前目标与可验证证据，将 canonical `docs/test-config.md` 重建或增量维护为 `drafted` / `reconfirm_required`。
+4. canonical 配置未达到当前阶段门禁时，结构化报告缺口；运行层可提供一次性运行输入，但不得将其包装为另一份 Schema 配置。
 
 ## 生命周期
 
@@ -59,11 +59,11 @@ version: 2.1.0
 ## 核心流程
 
 1. 识别项目 ID、工作区、模块、语言、框架和构建边界。
-2. 检查 `docs/test-config.md`：缺失、旧格式或字段不完整时，先按当前测试目标创建最小草稿或形成临时运行输入；不得覆盖既有文件。认证 Secret 可由运行层使用固定 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 的一次性 local bridge，但该文件不属于配置资产，L1 不生成、不读取且不得把它迁移进配置。Schema 2.1 配置则增量扫描。
+2. 检查唯一 canonical `docs/test-config.md`：缺失时创建最小多环境草稿；旧格式或字段不完整时，在获得覆盖授权后原位重建或增量维护，未获授权则报告缺口，不创建独立临时 Schema 配置。稳定非敏感环境值可直接写入 `secret: false` binding 的 `value`。Secret 真实值仅由可信宿主管理：持久环境 Secret 位于 `.panda-api-test-agent/local/secrets/environments/`，一次性 run bridge 仍位于 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json`；两者均不属于配置资产，L1 不创建、不读取、不修改、不迁移其真实值。
 3. 按需扫描项目通用约定、环境清单、HTTP、认证和当前目标所需的 Oracle；DB、Redis、MQ、配置中心、日志、轨迹和可观测性仅在当前 AC 或运行包需要时获取。
 4. 按 `references/scan-mapping.md` 记录来源、证据等级、Owner、状态和变化范围。
 5. 使用 `references/config-template.md` 创建或局部更新配置；未变化且已确认的节点保持原状态。
-6. 只将受影响节点标为 `drifted` 或 `reconfirm_required`，递增 `config_revision`。
+6. 稳定非敏感环境值、binding 元数据、Secret 引用或资源拓扑变化时，只将受影响节点标为 `drifted` 或 `reconfirm_required` 并递增 `config_revision`；仅轮换 Secret 真实值时不得修改 canonical 配置或递增 revision。
 7. 按 `references/profile-template.md` 独立生成或增量更新 `docs/interface-profile/*.md`，维护治理块、Owner、确认记录、画像 revision、生命周期和双指纹；接口生命周期不得替代项目配置生命周期。
 8. 只有契约语义变化才递增 `profile_revision` 和 `contract_fingerprint`；任何画像文件内容变化都更新 `document_fingerprint`。纯排版或说明文字变化不得伪造契约漂移。
 9. 解析用户提供的分支、Tag、Commit 或版本号：先查本地/远程 ref、相近命名、提交对象和基线文件；优先使用隔离 worktree 或只读对象检查，不切换、重置或覆盖用户工作区；记录实际采用基线与证据。
@@ -98,7 +98,7 @@ version: 2.1.0
 `test-config.md` 可以保存：
 
 - 项目 ID、模块、通用 API Prefix、响应包络和成功规则。
-- 多环境 HTTP、认证、DB、Redis、MQ、配置中心、日志和轨迹查询的 RuntimeContext binding 元数据。
+- 多环境 HTTP、认证、DB、Redis、MQ、配置中心、日志和轨迹查询的 RuntimeContext binding 元数据；`secret: false` 时还可保存经确认的稳定环境 `value`。
 - 项目通用安全策略、Owner、证据和状态。
 
 禁止保存：
@@ -113,13 +113,13 @@ version: 2.1.0
 
 ## 增量更新规则
 
-项目配置触发更新：环境增删改、域名/Gateway/API Prefix、认证机制、DB/Redis/MQ 拓扑、变量名、Secret 引用、可观测性入口、响应包络或安全规则变化。
+项目配置触发更新并递增 `config_revision`：环境增删改、稳定非敏感 `value`、域名/Gateway/API Prefix、认证机制、DB/Redis/MQ 拓扑、binding 元数据、Secret 引用、可观测性入口、响应包络或安全规则变化。
 
 接口画像触发复核：Controller/Router 路径或方法、DTO/字段/校验注解、响应结构、异常映射或业务错误码、鉴权注解或权限逻辑、Service 调用链、DB/Redis/MQ/外部调用副作用、清理入口、异步轮询和最终一致性条件发生变化。只更新受影响接口；未变化且已确认的事实保持原状态。
 
 运行差异不直接触发画像改写：先记录期望、实际、证据、候选分类和确认人，回查代码基线与部署版本；只有确认画像事实变化后才由本 skill 增量更新。产品缺陷、环境版本不一致和证据不足不得伪装成画像更新。
 
-不触发更新：新 PRD、需求状态、测试分支、固定 Commit、样本变化、单条用例失败、Token 值轮换、单次请求数量或验收结论变化。
+不触发更新：新 PRD、需求状态、测试分支、固定 Commit、样本变化、单条用例失败、Token/密码等 Secret 真实值轮换、单次请求数量或验收结论变化。Secret 引用本身变化仍属于配置变化。
 
 ## 待确认项
 
@@ -128,7 +128,7 @@ version: 2.1.0
 ## 纪律
 
 - 不编造扫描不到的信息；使用 `drafted`、`unverified` 或待确认。
-- 敏感值不得写入配置；只记录 RuntimeContext binding 的 `key/required/secret/format` 元数据。固定 local Secret bridge 是运行层的一次性输入，不属于配置、画像或 L1 管理资产。
+- 敏感值不得写入配置；`secret: true` binding 禁止 `value`，只记录 `key/required/secret/format` 与可选 `secret_ref`。`secret: false` binding 可记录稳定、非敏感环境 `value`。持久环境 Secret 目录与固定一次性 local Secret bridge 都属于可信宿主运行层，不属于配置、画像或 L1 管理资产；L1 不读写其中真实值。
 - DB 和 Redis 默认只读且只允许测试资源；只有当前 AC 明确需要时才获取连接或断言配置。
 - 不把源码存在当作环境已部署，不把文件生成当作配置已验证。
 - 不把扫描是否完成、扫描 gap 或单项低置信度发现当作统一执行门禁。
@@ -138,11 +138,11 @@ version: 2.1.0
 
 ## 完成判定
 
-- `docs/test-config.md` 符合 Schema 2.1 项目级多环境模板。
+- `docs/test-config.md` 是唯一 canonical 配置且符合 Schema 2.1 项目级多环境模板；不存在并行或独立临时 Schema 配置。
 - 至少生成一个接口画像，或明确记录未发现路由。
 - 配置包含 Owner、`config_revision`、资源级状态和安全规则。
 - 每个画像包含唯一治理块、Owner、`profile_revision`、代码基线、确认记录、生命周期、副作用/清理边界、`document_fingerprint` 和 `contract_fingerprint`。
-- 敏感字段全部为变量引用。
+- `secret: true` binding 全部只含 binding metadata/`secret_ref`，不含 `value` 或 Secret 真实值。
 - 画像治理块涉及的 `fact_id` 已登记，且进入 `confirmed`/`executable` 前全部为 `confirmed`。
 - 缺口已结构化和分层。
 - 结果明确为草稿或增量维护结果，不宣称测试已通过。

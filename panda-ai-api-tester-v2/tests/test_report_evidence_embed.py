@@ -1,4 +1,4 @@
-"""路线B：运行级报告内嵌脱敏请求/响应明细的单元测试（函数级，协议校验由 e2e 覆盖）。"""
+"""路线B：运行级报告内嵌原始请求/响应明细的单元测试（函数级，协议校验由 e2e 覆盖）。"""
 import importlib.util
 import json
 import tempfile
@@ -17,10 +17,10 @@ RUNNER_EXCHANGE_PAYLOAD = {
     "exchange": {
         "method": "POST",
         "url": "https://test3-cps.example.com/prod-api/app/order/resendScan/routeCheckAndSave",
-        "request_headers": {"Authorization": "***REDACTED***", "Content-Type": "application/json"},
+        "request_headers": {"Authorization": "Bearer stub-token", "Content-Type": "application/json"},
         "request_body": {"waybillNo": "WB001", "password": "p@ss", "token": "tk-123"},
         "status": 200,
-        "response_headers": {"Content-Type": "application/json", "Set-Cookie": "***REDACTED***"},
+        "response_headers": {"Content-Type": "application/json", "Set-Cookie": "sid=stub"},
         "response_body": {"code": 97004, "msg": "非本站运单"},
         "response_json": {"code": 97004},
         "elapsed_ms": 132.5,
@@ -42,12 +42,10 @@ JSONL_RECORD = {
 }
 
 
-class RedactionTests(unittest.TestCase):
-    def test_redact_json_masks_sensitive_keys_recursively(self):
-        out = rr._redact_json({"a": {"password": "x", "keep": 1}, "list": [{"api_key": "k"}]})
-        self.assertEqual(out["a"]["password"], "***")
-        self.assertEqual(out["a"]["keep"], 1)
-        self.assertEqual(out["list"][0]["api_key"], "***")
+class PayloadRenderTests(unittest.TestCase):
+    def test_render_payload_keeps_original_values(self):
+        out = rr._render_payload({"password": "x", "keep": 1})
+        self.assertIn('"password": "x"', out)
 
     def test_render_payload_truncates_long_text(self):
         text = rr._render_payload({"blob": "x" * 5000})
@@ -59,7 +57,7 @@ class RedactionTests(unittest.TestCase):
 
 
 class LoadExchangeTests(unittest.TestCase):
-    def test_runner_convention_loaded_and_masked(self):
+    def test_runner_convention_loaded_verbatim(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             (base / "evidence").mkdir()
@@ -71,10 +69,10 @@ class LoadExchangeTests(unittest.TestCase):
             self.assertEqual(item["label"], "主请求")
             self.assertEqual(item["http"], 200)
             self.assertIn("97004", item["response_body"])
-            self.assertNotIn("p@ss", item["request_body"], "password 值必须遮蔽")
-            self.assertNotIn("tk-123", item["request_body"], "token 值必须遮蔽")
-            self.assertEqual(item["headers"]["Authorization"], "***",
-                             "渲染层必须对敏感头做二次兜底")
+            self.assertIn("p@ss", item["request_body"])
+            self.assertIn("tk-123", item["request_body"])
+            self.assertEqual(item["headers"]["Authorization"],
+                             RUNNER_EXCHANGE_PAYLOAD["exchange"]["request_headers"]["Authorization"])
 
     def test_jsonl_convention_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -85,9 +83,9 @@ class LoadExchangeTests(unittest.TestCase):
             out = rr.load_http_exchanges(base / "result.json", "B01", ["evidence/protocol/B01.json"])
             self.assertEqual(len(out), 1)
             item = out[0]
-            self.assertNotIn("secret-token", json.dumps(item), "Authorization 值必须遮蔽")
-            self.assertNotIn("tk-123", json.dumps(item))
-            self.assertNotIn("p@ss", json.dumps(item))
+            self.assertIn("secret-token", json.dumps(item))
+            self.assertIn("tk-123", json.dumps(item))
+            self.assertIn("p@ss", json.dumps(item))
             self.assertIn("97004", item["response_body"])
 
     def test_missing_evidence_returns_none(self):
@@ -104,15 +102,15 @@ class LoadExchangeTests(unittest.TestCase):
 
 
 class RenderExchangeTests(unittest.TestCase):
-    def test_render_contains_sections_and_redaction_note(self):
+    def test_render_contains_sections_and_raw_payload(self):
         exchanges = rr.load_http_exchanges(
             Path(__file__).parent, "__none__", [])  # 空路径，手工构造
         exchanges = [rr._normalize_runner_exchange(RUNNER_EXCHANGE_PAYLOAD["exchange"], "主请求")]
         html = rr.render_http_exchanges(exchanges)
-        self.assertIn("原始请求/响应（脱敏摘要）", html)
+        self.assertIn("原始请求/响应", html)
         self.assertIn("routeCheckAndSave", html)
-        self.assertIn("敏感字段已遮蔽", html)
-        self.assertNotIn("p@ss", html)
+        self.assertIn("报文按原样展示", html)
+        self.assertIn("p@ss", html)
 
     def test_render_error_entry(self):
         html = rr.render_http_exchanges([{"error": "证据流水解析失败：x"}])

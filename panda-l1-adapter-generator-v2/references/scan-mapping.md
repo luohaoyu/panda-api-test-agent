@@ -26,7 +26,7 @@
 | 日志/轨迹入口 | 运维文档、配置 | `observability` | 可观测性负责人 |
 | 安全策略 | 项目规则、测试规范 | `safety` | 测试/安全负责人 |
 
-只保存 RuntimeContext binding 元数据（`key/required/secret/format`），不复制值，不生成 `_env` 字段。无法证明环境为非生产时，保持 `drafted` 并形成 `probe/hard` 缺口。
+`docs/test-config.md` 是唯一 canonical 多环境配置，不生成并行、需求级或独立临时 Schema 配置。RuntimeContext binding 必须保存 `key/required/secret/format` 元数据：`secret: false` 可额外保存经证据确认的稳定环境 `value`；`secret: true` 禁止 `value`，只允许 binding 元数据与 `secret_ref`。不生成 `_env` 字段。无法证明环境为非生产时，保持 `drafted` 并形成 `probe/hard` 缺口。
 
 ## 2. 禁止写入项目配置的扫描结果
 
@@ -60,10 +60,10 @@
 
 1. 先读取 Schema 2.1 配置与画像治理块，比较字段级差异及代码基线；旧 `_env` 配置不得继续消费。
 2. 未变化且已确认的配置节点和画像事实保持原状态。
-3. 配置声明或拓扑变化时，只将对应配置节点标记 `drifted` 或 `reconfirm_required`，递增 `metadata.config_revision`。
+3. 稳定非敏感 `value`、binding 元数据、`secret_ref` 或资源拓扑变化时，只将对应配置节点标记 `drifted` 或 `reconfirm_required`，递增 `metadata.config_revision`；持久 Secret 或 run bridge 中仅真实值轮换时，不修改配置且不递增 revision。
 4. 路由、方法、DTO/校验、响应、错误码、鉴权、Service 调用链、副作用、清理或异步收敛变化时，只将受影响画像标记 `drifted` 或 `reconfirm_required`。
 5. 契约语义变化时递增 `profile_revision`，更新 `contract_fingerprint` 与 `document_fingerprint`；纯排版/说明变化只更新 `document_fingerprint`。
-6. Token 值过期、网络临时失败等仅属于 `runtime_status`，不构成配置或画像漂移。
+6. Token/密码等 Secret 真实值的过期或轮换、网络临时失败仅属于运行层，不构成配置或画像漂移；持久环境 Secret 由可信宿主保存在 `.panda-api-test-agent/local/secrets/environments/`，一次性 run bridge 保持 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json`，L1 对两处真实值均无读写权限。
 7. 单条运行结果与画像不一致时先形成差异观察，回查代码基线、部署版本和责任人结论；不得直接用实际响应覆盖画像。
 8. 新需求、分支、样本和运行参数不触发项目配置或画像更新。
 

@@ -171,6 +171,8 @@ class MultiContractExecutionTests(unittest.TestCase):
             "design_fingerprint": design_fp,
             "candidate_case_ids": ids,
             "approved_case_ids": ids,
+            "reviewed_case_ids": ids,
+            "execution_case_ids": ids,
             "executable_case_ids": ids,
             "blocked_case_ids": [],
             "coverage_map": {},
@@ -204,7 +206,8 @@ class MultiContractExecutionTests(unittest.TestCase):
             if drift:
                 oracle["profile_revision"] = 9
             pkg = self._package_23(pkg, trigger, oracle)
-            package_path = Path(temp_dir) / "package.json"
+            package_path = Path(temp_dir) / ".panda-api-test-agent" / "runs" / "RUN-MULTI" / "package.json"
+            package_path.parent.mkdir(parents=True, exist_ok=True)
             package_path.write_text(json.dumps(pkg, ensure_ascii=False), encoding="utf-8")
             run_dir = Path(temp_dir) / "run"
             outcome = execute_test_package(

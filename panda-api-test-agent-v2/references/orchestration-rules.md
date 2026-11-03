@@ -2,17 +2,18 @@
 
 主 Agent 只判断、调度和聚合，不创建项目配置、不发送正式请求、不回写运行状态。`intent_router.py` 只做四类入口的本地设计路由；`single_api_quality.py`（L2）只做单接口结构化设计。二者都不读取 secret、不发请求；任何实际执行必须经过人工审核和 L2 trusted host/Runner。用户已提供 curl 时可直接进入设计输入，不强制扫描工程。
 
-依赖布局：本技能与 `panda-ai-api-tester-v2`、`panda-report-theme` 必须平级安装在同一个 skills 目录下，脚本按相对位置解析，缺失即 fail-closed 报错。
+依赖布局：主链路要求 `panda-ai-api-tester-v2` 与本技能平级可用；`panda-report-theme` 仅在正式需求级 HTML 报告阶段按需加载，不能阻塞入口、设计、审核或运行结果。
 
-## 1. 四层资产
+## 1. 资产分层
 
 | 层级 | 资产 | 职责 |
 |---|---|---|
-| 项目级 | `.panda-api-test-agent/test-config.md`、`.panda-api-test-agent/adapter/` | 多环境 HTTP、认证、DB、Redis、MQ、可观测性、安全策略和项目适配规则 |
-| 接口级 | `.panda-api-test-agent/interface-profile/*.md` | 路径、Schema、错误码、前置数据、副作用和契约指纹 |
+| 项目级 | `docs/test-config.md`、`.panda-api-test-agent/adapter/` | canonical 多环境 HTTP、认证绑定、DB、Redis、MQ、可观测性、安全策略和项目适配规则；Secret 值不得进入该层 |
+| 接口级 | `docs/interface-profile/*.md` | canonical 路径、Schema、错误码、前置数据、副作用和契约指纹；Secret 值不得进入该层 |
+| 持久 Secret 级 | `.panda-api-test-agent/local/secrets/environments/<environment-id>.secret.json` | 环境级持久 Secret Store；仅由可信宿主按 environment ID + 已声明 binding 精确存取，与一次性 Run bridge 并存 |
 | 需求级 | `.panda-api-test-agent/requirements/<id>/context.json`、`external-evidence.jsonl` | PRD、代码基线、目标接口、AC、专项数据/风险/授权；以及 append-only 的外部验证层证据登记（UI/DB/MQ/审计/人工） |
 | 数据源级 | `.panda-api-test-agent/data-sources.md` | 经责任人确认的造数通道登记：名称/工具（含 MCP 类如 datafactory）、支持环境、能力范围、数据标签规范、清理方式；设计期判"可构造"的证据来源，由 L1 或责任人确认后维护 |
-| 运行级 | `.panda-api-test-agent/runs/<run-id>/package.json`、`result.json`、evidence | 单次计划与不可变执行事实 |
+| 运行级 | `.panda-api-test-agent/runs/<run-id>/package.json`、`result.json`、evidence；`.panda-api-test-agent/local/runtime/secrets/<run-id>.secret.json` | 单次计划与不可变执行事实；后者仅为 `ephemeral_secret` 的一次性 bridge |
 
 组合关系：项目配置 + 接口画像 + 需求 context + 单次参数 = TestPackage。
 
@@ -20,15 +21,16 @@
 
 进入运行前按当前测试目标检查最小必需集合，不要求无关资源全部就绪：
 
-1. 优先检查 `.panda-api-test-agent/test-config.md` 和 `.panda-api-test-agent/adapter/`；配置不存在、旧格式或字段不完整，或适配根目录缺失时，调度 `panda-l1-adapter-generator-v2` 从源码、部署配置、环境变量、用户输入和已有测试资产按当前目标初始化或增量维护。首次只创建 `.panda-api-test-agent/adapter/` 根目录及当前目标必需内容，不预创建无关子目录；不得自动迁移或覆盖既有配置。
-2. 当前 HTTP 请求至少需要可验证的环境身份、Base URL、认证变量、超时和响应大小限制；DB、Redis、MQ、日志、轨迹和外部推送只在当前 AC 需要时获取。
-3. `environment_id` 必须可识别且不得是生产或疑似生产；无法确认环境安全时阻断，而不是用默认值猜测。
-4. 所有实际使用资源必须来自同一环境节点，禁止 HTTP/Token/DB/Redis/MQ 跨环境拼接。
-5. 接口画像按需检查：路由/方法、请求参数、响应/业务码、鉴权、副作用和当前用例需要的 Oracle 足够即可执行；完整 Owner、双指纹、清理和外部边界在对应正式 EXECUTE/PROMOTE 或资产沉淀时补齐。
-6. 需求 context 缺失时，先由主 Agent 根据 PRD、用户输入和实际采用基线创建最小上下文；不得因无关 AC 或未使用资源缺失阻断当前可执行 AC。
-7. 数据源前置检查：判测试数据缺口前，先查 `data-sources.md` 登记与当前会话可用的造数类 MCP/连接器（如 datafactory），核对支持环境与授权；存在且匹配当前目标环境时不判缺，改判为『需造数动作设计』，把造数建模为声明 `object_ref`/`teardown`/数据标签的 fixture 写入任务纳入设计。判缺必须登记 evidence（查过的来源与不可构造原因），未登记 evidence 的缺口视为诊断不完整。
+1. 简单单接口、调试和只读探测优先使用经审核的临时运行输入，不因缺少完整 `docs/test-config.md`、`docs/interface-profile/` 或适配根目录触发全工程前置扫描；只有当前用例确实需要长期配置、认证绑定、复杂数据或 Oracle 时，才调度 `panda-l1-adapter-generator-v2` 按目标局部初始化或增量维护。不得预创建无关子目录；不得自动迁移或覆盖既有配置。
+2. 用户提供配置后先分类：`stable_non_secret` → canonical config/画像；`persistent_secret` → 环境级持久 Secret Store；`ephemeral_secret` → 活动 Run 宿主内存/一次性 bridge；`runtime_non_secret` → 活动 Run/RuntimeContext；`requirement_fact` → requirement context。分类记录只保存 key、environment ID、binding、来源与去向，不复制 Secret 值。
+3. 当前 HTTP 请求至少需要可验证的环境身份、Base URL、认证变量、超时和响应大小限制；DB、Redis、MQ、日志、轨迹和外部推送只在当前 AC 需要时获取。运行级结论不要求用户理解这些内部资产名。
+4. `environment_id` 必须可识别且不得是生产或疑似生产；无法确认环境安全时阻断，而不是用默认值猜测。
+5. 所有实际使用资源必须来自同一环境节点，禁止 HTTP/Token/DB/Redis/MQ 跨环境拼接。
+6. 接口画像按需检查：路由/方法、请求参数、响应/业务码、鉴权、副作用和当前用例需要的 Oracle 足够即可执行；完整 Owner、双指纹、清理和外部边界在对应正式 EXECUTE/PROMOTE 或资产沉淀时补齐。
+7. 需求 context 缺失时，先由主 Agent 根据 PRD、用户输入和实际采用基线创建最小上下文；不得因无关 AC 或未使用资源缺失阻断当前可执行 AC。
+8. 数据源前置检查：判测试数据缺口前，先查 `data-sources.md` 登记与当前会话可用的造数类 MCP/连接器（如 datafactory），核对支持环境与授权；存在且匹配当前目标环境时不判缺，改判为『需造数动作设计』，把造数建模为声明 `object_ref`/`teardown`/数据标签的 fixture 写入任务纳入设计。判缺必须登记 evidence（查过的来源与不可构造原因），未登记 evidence 的缺口视为诊断不完整。数据缺口只能影响本轮 `execution_case_ids`，必须保留候选设计、审核范围和覆盖分母，并将受影响用例标记 `planned_disposition=not_run`。
 
-配置或画像缺口必须映射到具体 `stage`、AC 或 case。只阻断依赖该缺口的项，其余项继续执行。临时 URL/Token 仅运行时注入，不写入配置。旧格式仍不能被消费或伪装为长期 Schema 2.1；如需继续当前测试，必须由 L1 依据可验证证据生成独立、可审计的临时 Schema 2.1 运行配置，不修改旧文件；正式资产由 L1 按需补齐。
+配置、画像或运行 binding 判缺前，必须按“当前输入 → canonical `docs/test-config.md` / `docs/interface-profile/` → 目标环境持久 Secret Store → 活动 Run”检查并记录来源命中情况；任一来源已有仍有效值即复用，不得重复追问。四处均无值时，缺口才可映射到具体 `stage`、AC 或 case。只阻断依赖该缺口的项，其余项继续执行。临时 URL/Token 仅运行时注入，不写入配置。旧格式仍不能被消费或伪装为长期 Schema 2.1；只有当前获准用例确实依赖配置时，才由 L1 依据可验证证据生成独立、可审计的临时 Schema 2.1 运行配置，不修改旧文件；正式资产由 L1 按需补齐。
 
 ## 2.1 AI 与脚本职责边界
 
@@ -36,7 +38,7 @@
 - L1 脚本只提供可选的固定格式候选发现；其输出必须标记为候选，不等于已部署、已确认或可执行事实。
 - L1 事实账本（`docs/scan-facts/ledger.jsonl`）由 L1 独占写入；主 Agent 只读引用 `fact_id` 与确认状态，不确认、不改写、不复制成第二事实源。画像 `lifecycle=executable` 时未确认事实由 L1 校验与执行侧 `runner` 双重阻断。
 - L2 设计脚本只结构化 AI 已作出的语义选择；无 AI 决策时，候选设计必须停在 `pending_ai_decision`，不得进入可执行范围。
-- 审核、凭据隔离、请求执行、请求次数、脱敏、指纹、结果统计和报告生成必须由确定性脚本兜底。
+- 审核、凭据隔离、危险请求控制、请求执行、请求次数、指纹、结果统计和证据追溯必须由确定性脚本兜底；需求级 HTML 报告仅在触发需求报告条件时生成。
 
 ## 3. 状态模型
 
@@ -64,7 +66,7 @@
 - 当前 Token 失败：当前环境 EXECUTE 阻断；认证配置仍可为 active。
 - UAT DB 漂移：只阻断需要 UAT DB 的场景；其他环境和资源不受影响。
 - 环境退役、生产或无法确认是否为非生产：阻断所有运行。
-- 普通非生产 `write`、日志、轨迹和异步消息属于默认可执行副作用；`destructive`、批量、真实外部动作、删除/清理已有数据仍需确认。
+- 普通非生产 `write`、日志、轨迹和异步消息属于默认可执行副作用；`destructive`、批量、真实外部动作、删除/清理已有数据仍需确认，并且生产、破坏性、批量或真实外部动作必须再提供独立高风险授权，缺少授权时发送请求前阻断。
 - 无法清理不再自动阻断普通单次业务写入；必须记录精确对象、数据标签、残留风险和清理状态。只有 PROMOTE、批量回归或需要“完整通过”结论时，可靠 teardown 才是强制门禁。
 
 ## 4. 阶段与调度
@@ -78,18 +80,30 @@ intent_received -> preparing -> designing -> pending_review -(审核决定)-> ex
 `pending_review` 之后的括号不是 phase，而是 `review_status`：`approved`/`partially_approved` 才能进入 `executing`；`rejected`/`plan_only`/`expired`/`superseded` 停在原地并输出 `review_not_executable`。
 
 - AI 生成设计后只能进入 `pending_review`，不得跳过审核进入 `executing`。
-- `approved` 允许执行审核范围内全部具体用例；`partially_approved` 只允许执行 `approved_case_ids`，其余保持 `not_run`。
-- 用例、请求摘要、断言、数据依赖、副作用、环境、缺口或执行范围变化时，原审核置为 `superseded`，新设计回到 `pending_review`。
+- `approved` 默认审核完整候选范围；`execution_case_ids` 单独表示本轮实际可执行子集。`partially_approved` 仍可表达用户主动缩小设计范围，但不能被技能用来掩盖单纯数据暂不可用；未执行候选保持 `planned_disposition=not_run`。
+- 用例、请求摘要、断言、数据依赖、副作用、环境拓扑/URL/binding、缺口或执行范围变化时，原审核置为 `superseded`，新设计回到 `pending_review`。同一环境、同一 binding key 下的 Secret 值轮换只更新运行值，不改变设计指纹，不触发重审。
 - 设计审核与高风险动作审批分别校验，任一不满足都不得执行对应用例。
 
-v2 运行入口为 `scripts/run_orchestrator.py`，主 Agent 每回合只执行一个确定性动作：
+v2 运行入口为 `scripts/run_orchestrator.py`。每次脚本调用只执行一个确定性动作，但主 Agent 在同一次执行中必须连续调度多个确定性动作，直到真实用户等待点、不可恢复阻断或终态；不得把“一个动作”解释为“一个用户回合”：
 
-1. `compile_and_create_run()`：编译并创建统一 Run。已是 `approved`/`partially_approved` 时直接用规范化后的审核创建可执行 Run；`pending_review` 时创建不可执行 Run 并返回 `request_approval`；可执行但校验失败时拒绝创建。
-2. `record_review()`：把人工决定写回**同一 Run**（`pending_review` → `approved`/`partially_approved`/`rejected`…），推进 `review_status`/`status`/`next_action` 并追加 `review_recorded` 事件。fail-closed 拒绝：已 `reduced`/`reported` 的 Run、指纹不匹配、范围含未知用例、范围小于已执行用例。
-3. `next_action()`：读取 `state.json`、校验事件账本并返回下一步动作；不得在运行期重新排序任务。
-4. `execute_slice()`：只执行计划指定的一个切片。
+1. `compile_and_create_run()`：仅在不存在可复用的活动 Run 时编译并创建统一 Run。已是 `approved`/`partially_approved` 时直接用规范化后的审核创建可执行 Run；`pending_review` 时创建不可执行 Run 并返回设计审批请求；可执行但校验失败时拒绝创建。相同需求、环境和计划指纹已有未终结 Run 时禁止重建。
+2. `record_review()`：把人工决定写回**同一 Run**（`pending_review` → `approved`/`partially_approved`/`rejected`…），推进 `review_status`/`status`/`next_action` 并追加 `review_recorded` 事件。用户批准后的首个动作必须是该回写；审核记录同时保存完整 `reviewed_case_ids` 与本轮 `execution_case_ids`。fail-closed 拒绝：已 `reduced`/`reported` 的 Run、指纹不匹配、范围含未知用例、范围小于已执行用例。
+3. `next_action()`：读取 `state.json`、校验事件账本并返回下一步动作；不得在运行期重新排序任务。审批动作必须携带 `approval_kind=design_review|high_risk_authorization`；前者允许展示完整设计，后者只展示风险增量。
+4. `execute_slice()`：只执行计划指定的一个切片。执行成功后主 Agent立即再次调用 `next_action()`，普通 Slice 之间不询问用户。
 5. `reduce_run()`：从计划、事件和资源重算 `RunResult`，结果文件存在且内容不同时拒绝覆盖。
 6. `build_requirement_manifest()` / `build_requirement_manifest_for_runs()`：把单个/多个已归约 Run 投影为需求报告清单，最终仍由固定报告器渲染。
+
+连续推进循环固定为：
+
+```text
+next_action
+  -> execute_slice / execute_cleanup_first / replay_volatile_source / reduce
+  -> next_action
+  -> ...
+  -> request_design_review / request_high_risk_authorization / request_runtime_input / blocked / complete
+```
+
+只有最后一行的真实等待点或终态才结束当前 Agent 执行。`blocked` 先按 `failure_class` 分类；缺风险授权、运行时绑定、Token 或 pending cleanup 不得使设计审核失效。
 
 旧 TestPackage 管线保留为回退路径，不能在同一 Run 中混用两套调度状态。
 
@@ -131,7 +145,7 @@ v2 运行入口为 `scripts/run_orchestrator.py`，主 Agent 每回合只执行�
 
 1. 状态只能为 `approved` 或 `partially_approved`；
 2. 规范化后的指纹等于当前编译计划的 `plan_fingerprint`（别名解析后仍不等即视为设计已变）；
-3. `approved_case_ids`/`approved_scope` 非空、均存在于当前计划，且 `approved` 覆盖全部可执行用例、`partially_approved` 为严格子集；
+3. `reviewed_case_ids`/`approved_case_ids`/`approved_scope` 非空、均存在于当前计划；`execution_case_ids` 必须是审核范围子集。`approved` 默认覆盖完整候选设计，`partially_approved` 只在用户明确缩小设计范围时使用；数据 blocked 不得强迫从审核范围移除；
 4. `reviewed_fields` 能覆盖每个获准用例（数组形式自动扇出到全部获准用例）；
 5. 审核未过期、未被新设计取代；
 6. 高风险动作仍有独立审批；
@@ -152,7 +166,7 @@ v2 运行入口为 `scripts/run_orchestrator.py`，主 Agent 每回合只执行�
 - 需求 context 路径与引用
 - `environment.runtime_bindings`，为 Base URL、认证、Origin 白名单和只读操作声明 `key/required/secret/format`
 
-包内不得保存真实 URL、Token、数据库密码或连接串，只保存 RuntimeContext 绑定元数据。可信宿主根据这些绑定显式构造 RuntimeContext 2.0，并通过同进程 pipeline 传给 Runner。默认运行值由宿主内存提供；唯一文件例外是 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 的一次性 local Secret bridge。它必须绑定当前 run ID、environment ID、包指纹和不超过 10 分钟的 TTL，只包含包已声明且标记为 Secret 的 binding，并由可信宿主原子认领、校验、删除后才构造 RuntimeContext；删除失败必须阻断。旧 `_env`/`_key` 字段、顶层 authentication、`os.environ` 回退、argv/stdin、任意路径文件、目录扫描或历史文件回退均禁止。Runner 在创建 HTTP Executor 前必须完成 Schema、环境身份、必填值、Secret 分类、格式和设计审核校验。
+包内不得保存真实 URL、Token、数据库密码或连接串，只保存 RuntimeContext 绑定元数据。可信宿主根据这些绑定显式构造 RuntimeContext 2.0，并通过同进程 pipeline 传给 Runner。默认运行值由宿主内存提供；`persistent_secret` 可从 `.panda-api-test-agent/local/secrets/environments/<environment-id>.secret.json` 按当前 environment ID 和包已声明的 Secret binding 精确读取，`ephemeral_secret` 可从 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 的一次性 local Secret bridge 读取。持久 Store 不绑定单个 Run，不得被 Runner 删除；一次性 bridge 必须绑定当前 run ID、environment ID、包指纹和不超过 10 分钟的 TTL，只包含包已声明且标记为 Secret 的 binding，并由可信宿主原子认领、校验、删除后才构造 RuntimeContext，删除失败必须阻断。两者不得通过目录扫描、相近 environment ID、历史 Run 或旧文件回退。旧 `_env`/`_key` 字段、顶层 authentication、`os.environ` 回退、argv/stdin、任意其他路径文件均禁止。Runner 在创建 HTTP Executor 前必须完成 Schema、环境身份、必填值、Secret 分类、格式和设计审核校验。
 
 Runner 禁止自动重试。连接中断、超时、5xx、写请求结果未知或断言失败都必须保留首次事实并停止当前用例；如需重试，创建新的具体动作/用例，评估幂等与重复副作用，生成新设计指纹并重新审核。
 
@@ -182,6 +196,26 @@ Runner 禁止自动重试。连接中断、超时、5xx、写请求结果未知�
 
 结论一致性：报告总体结论（PASS/BLOCKED/FAIL/INCONCLUSIVE）与清单里的 `release_recommendation` 必须由同一组 AC 事实推导。`BLOCKED` 由“存在被门禁阻塞且未执行的 AC”触发；只要有一条 `none` 或未执行 AC，结论就不会是 PASS，发布建议也不得写“可进入下一阶段”。
 
+### 7.1 证据最低 schema（原始请求七要素）
+
+business_execution 类证据的 `request` 必须包含完整原始请求七要素：`method / url / path / query / headers / json / requested_at`（`json` 可为 null，`query` 可为空对象）；多步证据（`steps`）中每个携带 `request` 的步骤按同一规则校验。`headers` 仅做结构校验、按原样记录，不做凭据遮蔽——凭据在运行产物中的保留策略以 `SKILL.md`「凭据与运行值」为准（按原样保留、不再遮蔽；仍不得写入项目配置、TestPackage 或接口画像等跨运行资产）。
+
+校验时机为双重门：`slice_executor.execute_slice` 在任务通过后即时校验，违例任务置 `error`（事件带 `evidence_schema_errors`）；`reduce_run` 首次归约前对全部 passed 事实兜底校验，违例拒绝归约。校验实现唯一入口：`panda-ai-api-tester-v2/scripts/evidence_schema.py`。宿主自定义 task_executor 写证据同样受此约束——只有 `{method, path}` 的证据无法通过校验，报告因此永远无法闭合（2026-11-03 p919_2887 r1–r7 的根因）。
+
+### 7.2 AC 级 verdict 独立判定
+
+AC 的 verdict 只由该 AC scope 内用例的证据状态决定，并要求每条用例的证据文件通过 7.1 schema 校验；Run 级 verdict 不参与 AC 判定——Run 因无关候选 planned not_run 被判 inconclusive 时，证据齐全且通过校验的 direct AC 仍为 `passed`。Run verdict 保留为报告汇总字段。`generated_at` 取报告渲染时刻，不取 Run 开始时间。
+
+### 7.3 settlement：业务任务终态结算
+
+当 PRD 无删除能力、业务任务的成功执行即达成对象终态（如 `update-state` 停用即隔离）时，任务设计显式声明：
+
+```json
+{"settlement": {"on_success": true, "object_ref": "net_address:X", "as": "cleaned"}}
+```
+
+执行期：任务 passed 后由 `slice_executor` 自动结算该对象（写 `resource_settled` 事件），`cleanup_first` 门不再等待它。结算语义必须显式声明并经人工审核，禁止运行时按请求形态隐式推断。门等待 pending 对象时，`next_action` 返回 `guidance` 字段逐对象指明等待的 cleanup 任务或 settlement 声明，不得只报 `cleanup_first`。
+
 ## 8. 失败分类
 
 - 旧 Schema/缺配置：先尝试按需生成或构造临时运行输入；仅当前目标依赖且无法补齐时阻塞相关项。
@@ -200,7 +234,7 @@ Runner 禁止自动重试。连接中断、超时、5xx、写请求结果未知�
 - `category`：`skill_state_sync`、`skill_integrity`、`skill_integration`、`review_gate`、`execution_binding`、`runtime_precondition` 或 `execution_environment`；
 - `owner`：技能/宿主、L1/运行环境、审核人或用户；
 - `severity` 与 `recoverable`：区分严重性和是否可以安全自动恢复；
-- `evidence`：脱敏事实，不得包含 Token、密码、真实订单号或完整敏感地址；
+- `evidence`：运行事实，请求/响应与业务值按原样记录，不做遮蔽；
 - `impact`：阻塞当前阶段或哪些具体用例；
 - `next_action`：唯一下一步，明确谁来做。
 
@@ -232,4 +266,4 @@ Gate/exception -> diagnose -> classify owner -> safe auto-recovery -> revalidate
 - PROBE 失败：业务用例 `not_run`，报告实际请求数。
 - 运行错误：保留已产生证据，不回写项目配置。
 - 契约或配置指纹变化：阻断旧包，重新生成。
-- 凭据永不回显、落盘或写入报告。
+- 凭据仅经可信宿主从持久 Secret Store 或一次性 Run bridge 注入；不得写入 canonical 项目配置、TestPackage、接口画像或需求 context。运行产物（evidence、result、报告）的既有原样记录与展示策略保持不变。

@@ -25,7 +25,7 @@
 2. 每个候选用例声明输入前置条件、请求、预期 HTTP 码、预期业务 code、关键字段、清理标识与 `execution_dependencies`；无额外依赖时显式写 `[]`。
 3. 异常与边界用例不因服务端返回 5xx 而自动判定为缺陷；先核对画像契约和错误处理约定。
 4. 正向用例验证完整结果；不能只验证请求可达或 HTTP 200。
-5. 敏感字段使用环境变量或脱敏样例，禁止写入真实凭据。
+5. 敏感字段统一使用环境变量引用，不把真实凭据写入用例定义。
 6. 实际响应与画像不一致时生成结构化 `contract_observation`：记录 operation、expected、actual、evidence_refs、candidate_classification、decider 和 next_action；确认前不得把差异自动归类为画像漂移或用实际值覆盖预期。
 
 ## 多接口链路变量传递

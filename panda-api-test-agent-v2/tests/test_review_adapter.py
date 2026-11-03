@@ -33,7 +33,7 @@ class ReviewAdapterTests(unittest.TestCase):
             "review_id": "R1",
             "reviewer": "qa",
             "approved_at": "2026-10-31T00:00:00+00:00",
-            "reviewed_fields": {"C1": ["request", "assertions"]},
+            "reviewed_fields": {"C1": ["case", "request", "assertions", "data_dependencies", "side_effects"]},
         }
         result = adapt_review(review, package)
         self.assertFalse(result["execution_allowed"])

@@ -189,6 +189,28 @@ class ApprovedPackageCompilerTests(unittest.TestCase):
         self.assertIn("CHAIN-002-LABEL", package["feasibility"]["blocked_case_ids"])
         self.assertIn("CHAIN-002-LABEL", package["feasibility"]["out_of_scope_case_ids"])
         self.assertFalse(package["feasibility"]["coverage_map"]["full_requirement_coverage"])
+        blocked_case = next(item for item in package["cases"] if item["case_id"] == "CHAIN-002-LABEL")
+        self.assertEqual(blocked_case["planned_disposition"], "not_run")
+        self.assertIn("dependency", blocked_case["not_run_reason"])
+
+    def test_full_review_can_keep_blocked_case_in_review_and_execute_only_ready_case(self):
+        design = self._design()
+        design["cases"][1]["execution_dependencies"] = [{
+            "dependency_id": "DATA-LABEL-002",
+            "kind": "data",
+            "status": "blocked",
+            "description": "fixture unavailable",
+            "evidence": ["data-sources.md checked"],
+        }]
+        design["design_fingerprint"] = calculate_design_fingerprint(design)
+        design["review"]["design_fingerprint"] = design["design_fingerprint"]
+        design["review"]["execution_case_ids"] = ["CHAIN-001-CREATE"]
+        plan = build_feasibility_plan(design)
+        package = self._compile(design)
+        self.assertEqual(plan["reviewed_case_ids"], ["CHAIN-001-CREATE", "CHAIN-002-LABEL"])
+        self.assertEqual(plan["execution_case_ids"], ["CHAIN-001-CREATE"])
+        self.assertEqual(package["review"]["reviewed_case_ids"], ["CHAIN-001-CREATE", "CHAIN-002-LABEL"])
+        self.assertEqual(package["feasibility"]["executable_case_ids"], ["CHAIN-001-CREATE"])
 
 
 if __name__ == "__main__":

@@ -67,30 +67,39 @@ def _candidate_cases(design: dict[str, Any]) -> list[dict[str, Any]]:
     return cases
 
 
-def _review_binding(design: dict[str, Any], case_ids: list[str]) -> tuple[str, list[str], str | None]:
-    """Return review status and scope without requiring review during planning."""
+def _review_binding(design: dict[str, Any], case_ids: list[str]) -> tuple[str, list[str], list[str], str | None]:
+    """Return review status, reviewed design scope and this-round execution scope."""
     review = design.get("review") or {}
     status = review.get("status") or "pending_review"
     if status not in {"approved", "partially_approved"}:
-        return status, [], review.get("review_id")
-    scope = review.get("approved_case_ids")
-    if scope is None:
-        scope = review.get("approved_scope")
-    if scope is None and status == "approved":
-        scope = case_ids
-    if not isinstance(scope, list) or not scope:
-        raise FeasibilityPlanError("approved review requires a non-empty approved case scope")
-    if any(not isinstance(item, str) or not item for item in scope):
-        raise FeasibilityPlanError("approved scope must contain non-empty case IDs")
-    scope = list(dict.fromkeys(scope))
-    unknown = sorted(set(scope) - set(case_ids))
+        return status, [], [], review.get("review_id")
+    reviewed_scope = review.get("reviewed_case_ids")
+    if reviewed_scope is None:
+        reviewed_scope = review.get("approved_case_ids")
+    if reviewed_scope is None:
+        reviewed_scope = review.get("approved_scope")
+    if reviewed_scope is None and status == "approved":
+        reviewed_scope = case_ids
+    if not isinstance(reviewed_scope, list) or not reviewed_scope:
+        raise FeasibilityPlanError("approved review requires a non-empty reviewed case scope")
+    if any(not isinstance(item, str) or not item for item in reviewed_scope):
+        raise FeasibilityPlanError("reviewed scope must contain non-empty case IDs")
+    reviewed_scope = list(dict.fromkeys(reviewed_scope))
+    unknown = sorted(set(reviewed_scope) - set(case_ids))
     if unknown:
-        raise FeasibilityPlanError("approved scope contains unknown candidate cases: " + ", ".join(unknown))
-    if status == "approved" and set(scope) != set(case_ids):
+        raise FeasibilityPlanError("reviewed scope contains unknown candidate cases: " + ", ".join(unknown))
+    if status == "approved" and set(reviewed_scope) != set(case_ids):
         raise FeasibilityPlanError("approved review must cover every candidate case")
-    if status == "partially_approved" and set(scope) == set(case_ids):
-        raise FeasibilityPlanError("partially_approved review must identify a subset")
-    return status, scope, review.get("review_id")
+    execution_scope = review.get("execution_case_ids")
+    if execution_scope is None:
+        execution_scope = reviewed_scope
+    if not isinstance(execution_scope, list) or any(not isinstance(item, str) or not item for item in execution_scope):
+        raise FeasibilityPlanError("execution_case_ids must be a list of non-empty case IDs")
+    execution_scope = list(dict.fromkeys(execution_scope))
+    unknown_execution = sorted(set(execution_scope) - set(reviewed_scope))
+    if unknown_execution:
+        raise FeasibilityPlanError("execution scope contains cases outside reviewed scope: " + ", ".join(unknown_execution))
+    return status, reviewed_scope, execution_scope, review.get("review_id")
 
 
 def _normalize_dependencies(case: dict[str, Any], approved: bool) -> tuple[list[dict[str, Any]], list[str]]:
@@ -125,6 +134,10 @@ def _normalize_dependencies(case: dict[str, Any], approved: bool) -> tuple[list[
             reasons.append(f"case {case.get('case_id')} dependency {dependency_id} has unsupported status: {status}")
         if not isinstance(description, str) or not description.strip():
             reasons.append(f"case {case.get('case_id')} dependency {dependency_id} requires description")
+        if kind == "data" and status == "blocked":
+            evidence = item.get("evidence") or item.get("data_source_evidence_refs") or item.get("checked_sources")
+            if not evidence:
+                reasons.append(f"case {case.get('case_id')} data dependency {dependency_id} requires data-source evidence")
         normalized.append(copy.deepcopy(item))
         if approved and status == "blocked":
             reasons.append(f"case {case.get('case_id')} dependency is unresolved: {dependency_id}")
@@ -157,8 +170,9 @@ def build_feasibility_plan(design: dict[str, Any], *, plan_id: str | None = None
         raise FeasibilityPlanError("design must be an object")
     cases = _candidate_cases(design)
     case_ids = [case["case_id"] for case in cases]
-    review_status, approved_scope, review_id = _review_binding(design, case_ids)
-    approved = set(approved_scope)
+    review_status, reviewed_scope, execution_scope, review_id = _review_binding(design, case_ids)
+    approved = set(reviewed_scope)
+    execution_requested = set(execution_scope)
     reviewed = review_status in {"approved", "partially_approved"}
     design_fingerprint = _design_fingerprint(design)
 
@@ -178,6 +192,8 @@ def build_feasibility_plan(design: dict[str, Any], *, plan_id: str | None = None
         ]
         if candidate_only:
             reasons.append(f"case {case_id} is candidate_only and cannot enter package build")
+        if case.get("planned_disposition") == "not_run":
+            reasons.append(f"case {case_id} is explicitly planned not_run")
         for dependency_id in unresolved:
             reasons.append(f"case {case_id} dependency is unresolved: {dependency_id}")
         reasons = list(dict.fromkeys(reasons))
@@ -186,15 +202,23 @@ def build_feasibility_plan(design: dict[str, Any], *, plan_id: str | None = None
             ready_case_ids.append(case_id)
         else:
             blocked_case_ids.append(case_id)
-        if reviewed and case_id in approved:
-            approval_blocking_reasons.extend(reasons)
+        if reviewed and case_id in execution_requested:
+            # A blocked runtime/data dependency changes this round's execution
+            # disposition, not the completeness of the reviewed design. Only
+            # structural candidate errors fail the review gate.
+            approval_blocking_reasons.extend(
+                reason for reason in reasons
+                if "dependency is unresolved:" not in reason
+            )
         matrix.append({
             "case_id": case_id,
             "approved": case_id in approved,
+            "execution_requested": case_id in execution_requested,
             "candidate_only": candidate_only,
             "depends_on": list(case.get("depends_on") or []),
             "execution_dependencies": dependencies,
             "status": case_status,
+            "planned_disposition": "not_run" if case_status == "blocked" else "execute",
             "blocking_reasons": reasons,
         })
 
@@ -204,7 +228,9 @@ def build_feasibility_plan(design: dict[str, Any], *, plan_id: str | None = None
     if cycles:
         structural_reasons.append("case dependency graph contains a cycle: " + ", ".join(cycles[0]))
 
-    executable_case_ids = [case_id for case_id in approved_scope if case_id in ready_case_ids]
+    execution_case_ids = [case_id for case_id in execution_scope if case_id in ready_case_ids]
+    executable_case_ids = list(execution_case_ids)
+    blocked_reviewed_case_ids = [case_id for case_id in reviewed_scope if case_id in blocked_case_ids]
     out_of_scope_case_ids = [case_id for case_id in case_ids if reviewed and case_id not in approved]
 
     coverage_entries = []
@@ -256,10 +282,10 @@ def build_feasibility_plan(design: dict[str, Any], *, plan_id: str | None = None
         planning_status = "ready"
         gate_status = "pending_review"
         gate_reasons = []
-    elif approval_blocking_reasons or set(executable_case_ids) != approved:
+    elif approval_blocking_reasons:
         planning_status = "finalized"
         gate_status = "failed"
-        gate_reasons = approval_blocking_reasons or ["approved scope contains non-executable cases"]
+        gate_reasons = approval_blocking_reasons
     else:
         planning_status = "finalized"
         gate_status = "passed"
@@ -274,12 +300,18 @@ def build_feasibility_plan(design: dict[str, Any], *, plan_id: str | None = None
         "review_binding": {
             "status": review_status,
             "review_id": review_id,
-            "approved_case_ids": approved_scope,
+            "approved_case_ids": reviewed_scope,
+            "reviewed_case_ids": reviewed_scope,
+            "execution_case_ids": execution_scope,
         },
         "candidate_case_ids": case_ids,
-        "approved_case_ids": approved_scope,
+        "approved_case_ids": reviewed_scope,
+        "reviewed_case_ids": reviewed_scope,
+        "execution_requested_case_ids": execution_scope,
         "ready_case_ids": ready_case_ids,
+        "execution_case_ids": execution_case_ids,
         "executable_case_ids": executable_case_ids,
+        "blocked_reviewed_case_ids": blocked_reviewed_case_ids,
         "blocked_case_ids": blocked_case_ids,
         "out_of_scope_case_ids": out_of_scope_case_ids,
         "coverage_map": {
@@ -322,7 +354,7 @@ def validate_feasibility_plan(design: dict[str, Any], plan: dict[str, Any]) -> l
         errors.append("FEASIBILITY_PLAN_FINGERPRINT_MISMATCH: plan content changed after planning")
     for field in (
         "design_fingerprint", "planning_status", "review_binding", "candidate_case_ids",
-        "approved_case_ids", "ready_case_ids", "executable_case_ids", "blocked_case_ids",
+        "approved_case_ids", "reviewed_case_ids", "ready_case_ids", "execution_case_ids", "executable_case_ids", "blocked_reviewed_case_ids", "blocked_case_ids",
         "out_of_scope_case_ids", "coverage_map", "dependency_matrix", "gate",
     ):
         if plan.get(field) != expected.get(field):
@@ -354,12 +386,15 @@ def validate_package_feasibility(package: dict[str, Any]) -> list[str]:
     if gate.get("gate_id") != GATE_ID or gate.get("status") != "passed":
         errors.append("FEASIBILITY_GATE_FAILED: embedded feasibility gate is not passed")
     review_scope = set((package.get("review") or {}).get("approved_scope") or [])
-    executable = set(feasibility.get("executable_case_ids") or [])
-    if review_scope != executable:
-        errors.append("feasibility executable_case_ids must exactly match review.approved_scope")
+    reviewed = set(feasibility.get("reviewed_case_ids") or [])
+    execution = set(feasibility.get("execution_case_ids") or feasibility.get("executable_case_ids") or [])
+    if review_scope != reviewed:
+        errors.append("feasibility reviewed_case_ids must exactly match review.approved_scope")
     case_ids = {case.get("case_id") for case in package.get("cases") or [] if isinstance(case, dict)}
-    if not executable.issubset(case_ids):
-        errors.append("feasibility references executable cases absent from package")
+    if not execution.issubset(case_ids):
+        errors.append("feasibility references execution cases absent from package")
+    if not execution.issubset(review_scope):
+        errors.append("feasibility execution_case_ids must be a subset of review.approved_scope")
     if build.get("source_feasibility_fingerprint") != declared:
         errors.append("package_build source_feasibility_fingerprint mismatch")
     if build.get("source_design_fingerprint") != feasibility.get("design_fingerprint"):

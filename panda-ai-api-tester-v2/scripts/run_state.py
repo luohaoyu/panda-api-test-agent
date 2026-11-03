@@ -97,9 +97,10 @@ def create_run(run_dir: str | Path, *, run_id: str, plan_id: str, plan_fingerpri
         entry_type = metadata.get("entry_type", "single_api_quality")
         review = metadata.get("review") if isinstance(metadata.get("review"), dict) else {"status": "pending_review", "approved_case_ids": []}
         review_status = review.get("status", "pending_review")
-        approved_case_ids = review.get("approved_case_ids") or review.get("approved_scope") or []
-        if review_status == "approved" and not approved_case_ids:
-            approved_case_ids = [item.get("case_id") for item in plan.get("tasks", []) if isinstance(item, dict) and item.get("case_id")]
+        reviewed_case_ids = review.get("reviewed_case_ids") or review.get("approved_case_ids") or review.get("approved_scope") or []
+        if review_status == "approved" and not reviewed_case_ids:
+            reviewed_case_ids = [item.get("case_id") for item in plan.get("tasks", []) if isinstance(item, dict) and item.get("case_id")]
+        execution_case_ids = review.get("execution_case_ids") or reviewed_case_ids
         executable = review_status in {"approved", "partially_approved"}
         initial_status = "ready" if executable else "awaiting_approval" if review_status == "pending_review" else "blocked"
         initial_phase = "executing" if executable else "pending_review"
@@ -111,7 +112,9 @@ def create_run(run_dir: str | Path, *, run_id: str, plan_id: str, plan_fingerpri
         "status": initial_status,
         "review_status": review_status,
         "review_id": review.get("review_id"),
-        "approved_case_ids": list(approved_case_ids),
+        "approved_case_ids": list(reviewed_case_ids),
+        "reviewed_case_ids": list(reviewed_case_ids),
+        "execution_case_ids": list(execution_case_ids),
         "design_fingerprint": review.get("design_fingerprint"),
         "plan_fingerprint": review.get("plan_fingerprint") or plan_fingerprint,
         "config_ref": metadata.get("config_ref", {}),

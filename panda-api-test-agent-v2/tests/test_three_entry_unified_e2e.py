@@ -34,7 +34,7 @@ class ThreeEntryUnifiedE2ETests(unittest.TestCase):
             "reviewer": "qa",
             "approved_at": "2026-11-01T05:10:00+08:00",
             "plan_fingerprint": plan["plan_fingerprint"],
-            "reviewed_fields": {case_id: ["request", "assertions", "side_effect"] for case_id in scope},
+            "reviewed_fields": {case_id: ["case", "request", "assertions", "data_dependencies", "side_effects"] for case_id in scope},
         }
 
     def _run_and_report(self, intent, run_id, executor, review=None):

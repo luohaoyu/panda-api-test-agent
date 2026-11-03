@@ -14,6 +14,8 @@ from typing import Any
 
 EXECUTABLE_REVIEWS = {"approved", "partially_approved"}
 REQUIRED_ASSETS = ("project", "test_config", "contract", "environment", "risk")
+CONFIG_GAP_KINDS = {"config", "profile", "secret", "runtime_binding"}
+CONFIG_SOURCE_ORDER = ("current_input", "canonical_config", "persistent_secret_store", "active_run")
 
 
 def _issue(
@@ -58,11 +60,29 @@ def _scope(review: dict[str, Any], case_ids: list[str]) -> list[str]:
 
 
 def _review_fields(review: dict[str, Any], scope: list[str]) -> list[str]:
-    fields = review.get("reviewed_fields")
+    """Return approved cases whose reviewed-field declaration is missing.
+
+    Keep this diagnostic aligned with review_adapter.canonical_review so a valid
+    documented alias can never be accepted by the adapter and rejected here.
+    """
+    fields = review.get("case_reviewed_fields") or review.get("reviewed_fields_by_case")
+    overall = review.get("reviewed_fields")
+    if isinstance(overall, dict) and isinstance(overall.get("cases"), dict):
+        fields = overall.get("cases")
+        overall = overall.get("overall")
     if isinstance(fields, dict):
         return [case_id for case_id in scope if not isinstance(fields.get(case_id), list) or not fields.get(case_id)]
-    if isinstance(fields, list) and fields and all(isinstance(item, str) for item in fields):
-        return []
+    if isinstance(overall, dict):
+        return [case_id for case_id in scope if not isinstance(overall.get(case_id), list) or not overall.get(case_id)]
+    if isinstance(overall, list) and overall:
+        if all(isinstance(item, str) for item in overall):
+            return []
+        mapped = {
+            item.get("case_id"): item.get("fields")
+            for item in overall
+            if isinstance(item, dict) and isinstance(item.get("case_id"), str)
+        }
+        return [case_id for case_id in scope if not isinstance(mapped.get(case_id), list) or not mapped.get(case_id)]
     return list(scope)
 
 
@@ -122,6 +142,50 @@ def _split_blocking_gaps(design: dict[str, Any], scope: list[str]) -> tuple[list
     return blocking, deferred
 
 
+def _config_source_issues(design: dict[str, Any]) -> list[dict[str, Any]]:
+    """Require proof that all four configured sources were checked before a gap.
+
+    This consumes source-presence metadata only. It never reads or emits Secret
+    values; persistent Store and active Run checks are performed by the trusted
+    host and summarized as booleans.
+    """
+    issues: list[dict[str, Any]] = []
+    for gap in design.get("known_gaps") or []:
+        if not isinstance(gap, dict) or gap.get("blocking") is not True:
+            continue
+        if gap.get("kind") not in CONFIG_GAP_KINDS:
+            continue
+        checks = gap.get("source_checks")
+        missing = [name for name in CONFIG_SOURCE_ORDER if not isinstance(checks, dict) or name not in checks]
+        if missing:
+            gap_id = str(gap.get("gap_id") or gap.get("description") or "unknown-gap")
+            issues.append(_issue(
+                "CONFIG_SOURCE_CHECK_INCOMPLETE",
+                category="runtime_precondition",
+                owner="skill_or_runtime_host",
+                severity="high",
+                recoverable=False,
+                evidence=f"gap {gap_id} lacks source checks: " + ", ".join(missing),
+                impact="the value may already exist, so the gap and a repeated user question are not justified",
+                next_action="check current input, docs/test-config.md or docs/interface-profile/, the environment persistent Secret Store, and the active Run before asking",
+            ))
+            continue
+        available = [name for name in CONFIG_SOURCE_ORDER if checks.get(name) is True]
+        if available:
+            gap_id = str(gap.get("gap_id") or gap.get("description") or "unknown-gap")
+            issues.append(_issue(
+                "CONFIG_VALUE_ALREADY_AVAILABLE",
+                category="skill_state_sync",
+                owner="skill_or_runtime_host",
+                severity="high",
+                recoverable=False,
+                evidence=f"gap {gap_id} has an available value in: " + ", ".join(available),
+                impact="asking again would duplicate an already persisted or active value",
+                next_action="reuse the existing binding without re-asking; if the source cannot be loaded, report that source failure instead",
+            ))
+    return issues
+
+
 def _execution_dependency_issues(design: dict[str, Any], scope: list[str]) -> list[dict[str, Any]]:
     cases = {
         item.get("case_id"): item
@@ -164,16 +228,28 @@ def _execution_dependency_issues(design: dict[str, Any], scope: list[str]) -> li
             if not isinstance(dependency, dict):
                 continue
             if dependency.get("status") == "blocked":
+                dependency_kind = dependency.get("kind")
+                if dependency_kind == "data":
+                    evidence = dependency.get("evidence") or dependency.get("data_source_evidence_refs")
+                    code = "DATA_SOURCE_CHECK_INCOMPLETE" if not evidence else "DATA_DEPENDENCY_BLOCKED"
+                    next_action = (
+                        "check data-sources.md and authorized fixture/datafactory channels; keep the candidate in the reviewed design"
+                        if not evidence else
+                        "keep the candidate in the reviewed design with planned_disposition=not_run; resolve the data dependency before execution"
+                    )
+                else:
+                    code = "EXECUTION_DEPENDENCY_BLOCKED"
+                    next_action = "resolve the dependency while keeping the candidate in the reviewed design; mark it not_run until resolved"
                 issues.append(
                     _issue(
-                        "EXECUTION_DEPENDENCY_BLOCKED",
+                        code,
                         category="runtime_precondition",
                         owner="runtime_or_l1",
                         severity="high",
                         recoverable=False,
-                        evidence=f"case {case_id} declares a blocked dependency",
-                        impact="approved case must remain not_run",
-                        next_action="resolve the dependency or explicitly remove the case from the approved scope",
+                        evidence=f"case {case_id} declares a blocked {dependency_kind or 'execution'} dependency",
+                        impact="candidate remains designed and reviewed but must not send a request",
+                        next_action=next_action,
                     )
                 )
     return issues
@@ -212,6 +288,7 @@ def diagnose_design(
 
     issues: list[dict[str, Any]] = []
     deferred_gaps: list[str] = []
+    issues.extend(_config_source_issues(design))
     review = design.get("review") if isinstance(design.get("review"), dict) else {}
     status = review.get("status") or "pending_review"
     case_ids = _case_ids(design)

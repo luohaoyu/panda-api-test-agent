@@ -152,6 +152,9 @@ def compile_approved_package(
     if not isinstance(raw_cases, list) or not raw_cases or any(not isinstance(case, dict) for case in raw_cases):
         raise PackageCompileError("approved design requires a non-empty cases list")
     cases = copy.deepcopy(raw_cases)
+    for case in cases:
+        if not case.get("case_id") and case.get("task_id"):
+            case["case_id"] = case["task_id"]
     case_ids = _case_ids(cases)
     if any(not isinstance(case_id, str) or not case_id for case_id in case_ids) or len(case_ids) != len(set(case_ids)):
         raise PackageCompileError("case_id values must be non-empty and unique")
@@ -172,9 +175,10 @@ def compile_approved_package(
             "PACKAGE_BUILD_BLOCKED_UNRESOLVED_DEPENDENCY: "
             + ("; ".join(reasons) if reasons else "human-approved scope contains non-executable cases")
         )
-    if set(feasibility_plan.get("executable_case_ids") or []) != set(scope):
+    executable_ids = set(feasibility_plan.get("execution_case_ids") or feasibility_plan.get("executable_case_ids") or [])
+    if not executable_ids.issubset(set(scope)):
         raise PackageCompileError(
-            "PACKAGE_BUILD_SCOPE_MISMATCH: feasibility executable scope must match human-approved scope"
+            "PACKAGE_BUILD_SCOPE_MISMATCH: feasibility execution scope must be a subset of the reviewed scope"
         )
     source_fingerprint = _source_design_fingerprint(design, review)
     if not source_fingerprint:
@@ -191,6 +195,19 @@ def compile_approved_package(
         )
 
     package = _resolve_template(design, execution_assets)
+    feasibility_by_case = {
+        item.get("case_id"): item
+        for item in (feasibility_plan.get("dependency_matrix") or {}).get("cases") or []
+        if isinstance(item, dict) and item.get("case_id")
+    }
+    for case in cases:
+        case_id = case.get("case_id")
+        matrix_item = feasibility_by_case.get(case_id) or {}
+        case["planned_disposition"] = matrix_item.get("planned_disposition") or (
+            "execute" if case_id in executable_ids else "not_run"
+        )
+        if case["planned_disposition"] == "not_run":
+            case["not_run_reason"] = "; ".join(matrix_item.get("blocking_reasons") or []) or "execution dependency unresolved"
     package.update({
         "schema_version": "2.3" if isinstance(package.get("contracts"), list) and package["contracts"] else "2.2",
         "package_id": package_id or design.get("package_id") or f"PKG-{design.get('requirement_id', 'API')}",
@@ -221,6 +238,8 @@ def compile_approved_package(
     normalized_review["status"] = review["status"]
     normalized_review["approved_scope"] = scope
     normalized_review["approved_case_ids"] = scope
+    normalized_review["reviewed_case_ids"] = list(scope)
+    normalized_review.setdefault("execution_case_ids", sorted(executable_ids))
     normalized_review["reviewed_fields"] = reviewed_fields
     normalized_review["design_fingerprint"] = source_fingerprint
     normalized_review["source_design_fingerprint"] = source_fingerprint

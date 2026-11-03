@@ -1,10 +1,10 @@
 # 项目接口测试配置模板（Schema 2.1）
 
-> 作用域：项目级。一个项目维护一份 `docs/test-config.md`，统一描述多套测试环境。禁止写入需求、分支、Commit、样本、用例、结果或真实凭据。
+> 作用域：项目级。一个项目只维护一份 canonical `docs/test-config.md`，统一描述多套测试环境；不得创建需求级、并行或“独立临时 Schema 配置”。禁止写入需求、分支、Commit、样本、用例、结果或真实凭据。
 
 ## 1. 机器配置块
 
-配置消费者必须读取下面唯一的 `yaml test-config` 代码块；其余文字仅用于说明。字段未知时使用 `drafted`、`unverified`、空数组或 `${VAR}`，禁止猜值。所有运行值只保存 binding key 与元数据，不保存实际值。
+配置消费者必须读取下面唯一的 `yaml test-config` 代码块；其余文字仅用于说明。字段未知时使用 `drafted`、`unverified`、空数组或 `${VAR}`，禁止猜值。`secret: false` binding 可保存经确认、稳定且非敏感的环境 `value`；`secret: true` binding 禁止 `value`，只保存 binding 元数据和可选 `secret_ref`。
 
 ```yaml test-config
 metadata:
@@ -47,6 +47,7 @@ environments:
         required: true
         secret: false
         format: url
+        value: ${STABLE_ENV_BASE_URL}
       allowed_origins:
         key: ${ENV_ALLOWED_ORIGINS_KEY}
         required: true
@@ -65,6 +66,7 @@ environments:
           required: true
           secret: true
           format: string
+          secret_ref: environments/${ENVIRONMENT_ID}/auth
 
     http:
       timeout_seconds: 30
@@ -229,9 +231,11 @@ pending_items: []
 - `key`：可信宿主构造 RuntimeContext 时使用的唯一键；
 - `required`：当前资源是否必须提供；
 - `secret`：是否属于敏感值；
-- `format`：`string|url|origin_list|operation_list`。
+- `format`：`string|url|origin_list|operation_list`；
+- `value`：仅允许在 `secret: false` 时保存经证据确认、跨运行稳定的非敏感环境值；
+- `secret_ref`：仅用于 `secret: true`，引用可信宿主管理的 Secret，不能包含真实值。
 
-配置文件只保存 binding 元数据。真实 URL、Token、Cookie、账号、密码、连接串及资源 profile 不得写入配置、TestPackage、argv、stdin、普通临时文件、结果或报告。唯一运行层例外是固定 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 的一次性 local Secret bridge；它不属于 Schema 2.1 配置或长期项目资产，L1 不创建、不消费、不迁移，只允许可信宿主按运行、环境、包指纹和短 TTL 校验后读取即删除。旧 `_env` 字段不属于 Schema 2.1。
+`secret: true` binding 禁止 `value`，只保存 `key/required/secret/format` 和可选 `secret_ref`。Token、Cookie、账号、密码、连接串及资源 profile 等 Secret 真实值不得写入配置、TestPackage、argv、stdin、普通临时文件、结果或报告。可信宿主可将持久环境 Secret 保存在 `.panda-api-test-agent/local/secrets/environments/`，并继续使用 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 作为一次性 run bridge；前者是环境级持久 Secret store，后者必须按运行、环境、包指纹和短 TTL 校验后读取即删除。两者都不属于 Schema 2.1 配置或 L1 管理资产，L1 不创建、不读取、不修改、不迁移其中真实值。旧 `_env` 字段不属于 Schema 2.1。
 
 ## 3. 字段证据要求
 
@@ -265,8 +269,8 @@ TEST_CONFIG_SCHEMA_UNSUPPORTED
 检测到旧版 test-config.md。当前仅支持项目级多环境 Schema 2.1；请依据可验证证据重建项目配置。
 ```
 
-不兼容、不迁移、不猜测。
+不兼容、不迁移、不猜测，也不生成替代性的独立临时 Schema 配置。只重建或增量维护 canonical `docs/test-config.md`；未获覆盖授权时报告结构化缺口。
 
-## 7. 最近变更摘要
+## 7. Revision 与最近变更摘要
 
-只记录最近一次有效变更。完整历史由 Git 管理。初版只能标记为 `drafted`，不能标记为已验证或业务通过。
+稳定非敏感 `value`、binding 元数据、`secret_ref`、环境或资源拓扑变化时，递增 `metadata.config_revision` 并只记录最近一次有效变更；完整历史由 Git 管理。持久 Secret store 或一次性 run bridge 中仅 Secret 真实值轮换时，不修改 `docs/test-config.md`、不更新 `updated_at`、不递增 revision。初版只能标记为 `drafted`，不能标记为已验证或业务通过。

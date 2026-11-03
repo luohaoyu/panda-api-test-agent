@@ -10,13 +10,15 @@ class RequirementValidationTests(unittest.TestCase):
     def test_none_acceptance_item_does_not_create_api_case(self):
         intent = build_requirement_validation_intent({"requirement_id": "REQ-1", "acceptance_criteria": [{"ac_id": "AC-1", "title": "页面展示", "interface_verifiability": "none", "recommended_validation_layers": ["UI"]}]}, "uat")
         self.assertEqual(intent["cases"], [])
+        self.assertEqual(intent["coverage_matrix"][0]["coverage_status"], "not_api_verifiable")
         self.assertEqual(intent["acceptance_criteria"][0]["interface_verifiability"], "none")
         self.assertTrue(any(gap["gap_id"] == "GAP-AC-1-NON-API" for gap in intent["known_gaps"]))
 
-    def test_partial_keeps_interface_and_non_interface_scope(self):
+    def test_scope_fields_alone_do_not_make_partial_semantic_decision(self):
         criteria = classify_acceptance_criteria([{"id": "AC-2", "interface_scope": ["backend state"], "non_interface_scope": ["client display"]}])
-        self.assertEqual(criteria[0]["interface_verifiability"], "partial")
-        self.assertEqual(criteria[0]["interface_scope"], ["backend state"])
+        self.assertIsNone(criteria[0]["interface_verifiability"])
+        self.assertEqual(criteria[0]["verifiability_decision_status"], "pending_ai_decision")
+        self.assertEqual(criteria[0]["interface_scope"], [])
         self.assertEqual(criteria[0]["non_interface_scope"], ["client display"])
 
     def test_direct_acceptance_keeps_declared_task(self):
@@ -24,6 +26,8 @@ class RequirementValidationTests(unittest.TestCase):
         self.assertEqual(intent["tasks"][0]["acceptance_refs"], ["AC-1"])
         self.assertEqual(intent["acceptance_criteria"][0]["verifiability_decision_status"], "ai_decided")
         self.assertEqual(intent["review"]["status"], "pending_review")
+        self.assertEqual(intent["candidate_case_ids"], ["T1"])
+        self.assertEqual(intent["coverage_matrix"][0]["coverage_status"], "designed")
 
     def test_scope_fields_alone_do_not_make_semantic_decision(self):
         intent = build_requirement_validation_intent({"requirement_id": "REQ-3", "acceptance_criteria": [{"id": "AC-1", "interface_scope": ["request accepted"]}]}, "uat")

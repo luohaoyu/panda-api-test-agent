@@ -34,7 +34,7 @@ class ExecutionDiagnosticsTests(unittest.TestCase):
             "reviewer": "user",
             "approved_at": "2026-11-01T11:00:00+08:00",
             "design_fingerprint": design["design_fingerprint"],
-            "reviewed_fields": {"C1": ["request", "assertions", "side_effect"]},
+            "reviewed_fields": {"C1": ["case", "request", "assertions", "data_dependencies", "side_effects"]},
         }
         return design
 
@@ -104,6 +104,82 @@ class ExecutionDiagnosticsTests(unittest.TestCase):
         ]
         diagnosis = diagnose_design(design, execution_assets=assets)
         self.assertIn("DESIGN_BLOCKING_GAPS_PRESENT", {item["code"] for item in diagnosis["issues"]})
+
+    def test_blocked_data_dependency_is_not_scoped_out_by_diagnosis(self):
+        design = self._design()
+        design["cases"][0]["execution_dependencies"] = [{
+            "dependency_id": "DATA-1",
+            "kind": "data",
+            "status": "blocked",
+            "description": "needs fixture",
+            "evidence": ["data-sources.md: checked; no matching fixture"],
+        }]
+        design["design_fingerprint"] = calculate_design_fingerprint(design)
+        design["review"]["design_fingerprint"] = design["design_fingerprint"]
+        diagnosis = diagnose_design(design, execution_assets={field: {} for field in ("project", "test_config", "contract", "environment", "risk")}, feasibility_plan={})
+        issue = next(item for item in diagnosis["issues"] if item["code"] == "DATA_DEPENDENCY_BLOCKED")
+        self.assertIn("not_run", issue["next_action"])
+        self.assertNotIn("remove", issue["next_action"])
+
+    def test_config_gap_requires_all_four_source_checks(self):
+        design = self._design()
+        design["known_gaps"] = [{
+            "gap_id": "GAP-AUTH",
+            "kind": "secret",
+            "blocking": True,
+            "source_checks": {"current_input": False, "canonical_config": False},
+        }]
+        diagnosis = diagnose_design(design)
+        issue = next(item for item in diagnosis["issues"] if item["code"] == "CONFIG_SOURCE_CHECK_INCOMPLETE")
+        self.assertIn("persistent_secret_store", issue["evidence"])
+        self.assertIn("active_run", issue["evidence"])
+
+    def test_available_persistent_secret_prevents_missing_value_question(self):
+        design = self._design()
+        design["known_gaps"] = [{
+            "gap_id": "GAP-AUTH",
+            "kind": "secret",
+            "blocking": True,
+            "source_checks": {
+                "current_input": False,
+                "canonical_config": False,
+                "persistent_secret_store": True,
+                "active_run": False,
+            },
+        }]
+        diagnosis = diagnose_design(design)
+        issue = next(item for item in diagnosis["issues"] if item["code"] == "CONFIG_VALUE_ALREADY_AVAILABLE")
+        self.assertIn("reuse", issue["next_action"])
+        self.assertNotIn("secret-value", format_diagnosis(diagnosis))
+
+    def test_exhaustive_source_checks_allow_a_real_config_gap(self):
+        design = self._design()
+        design["known_gaps"] = [{
+            "gap_id": "GAP-URL",
+            "kind": "runtime_binding",
+            "blocking": True,
+            "source_checks": {name: False for name in (
+                "current_input", "canonical_config", "persistent_secret_store", "active_run"
+            )},
+        }]
+        diagnosis = diagnose_design(design)
+        codes = {item["code"] for item in diagnosis["issues"]}
+        self.assertNotIn("CONFIG_SOURCE_CHECK_INCOMPLETE", codes)
+        self.assertNotIn("CONFIG_VALUE_ALREADY_AVAILABLE", codes)
+        self.assertIn("DESIGN_BLOCKING_GAPS_PRESENT", codes)
+
+    def test_documented_reviewed_fields_wrappers_are_accepted(self):
+        assets = {field: {} for field in ("project", "test_config", "contract", "environment", "risk")}
+        for reviewed_fields in (
+            {"cases": {"C1": ["case", "request"]}},
+            [{"case_id": "C1", "fields": ["case", "request"]}],
+            ["case", "request"],
+        ):
+            with self.subTest(reviewed_fields=reviewed_fields):
+                design = self._design()
+                design["review"]["reviewed_fields"] = reviewed_fields
+                diagnosis = diagnose_design(design, execution_assets=assets, feasibility_plan={})
+                self.assertNotIn("REVIEWED_FIELDS_MISSING", {item["code"] for item in diagnosis["issues"]})
 
     def test_diagnosis_does_not_mutate_design(self):
         design = self._design()
