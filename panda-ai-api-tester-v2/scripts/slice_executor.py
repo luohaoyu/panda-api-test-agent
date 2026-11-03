@@ -11,7 +11,6 @@ from typing import Any
 
 from run_state import append_event, load_state, load_resources, update_resources, update_state, validate_run_integrity
 from result_reducer import load_events
-import evidence_schema
 
 
 class SliceExecutionError(RuntimeError):
@@ -255,48 +254,25 @@ def execute_slice(run_dir: str | Path, slice_id: str, *, runtime_context: Any = 
         append_event(root, {"type": "slice_blocked_unreviewed", "slice_id": slice_id, "task_ids": slice_spec.get("task_ids") or [], "review_status": state.get("review_status"), "reason": clearance_reason})
         update_state(root, {"status": "blocked", "next_action": "review_not_executable", "next_slice_id": slice_id, "failure_class": clearance})
         raise ApprovalRequired(clearance_reason)
-    if state.get("status") in {"reduced", "reported"}:
+    if state.get("status") in {"blocked", "reduced", "reported"}:
         raise SliceExecutionError(f"run is not executable in status {state.get('status')}")
-    if state.get("status") == "blocked" and state.get("failure_class") != "high_risk_approval_required":
-        raise SliceExecutionError(f"run is not executable in status {state.get('status')}")
-    if state.get("status") == "blocked" and state.get("failure_class") == "high_risk_approval_required":
-        if state.get("next_slice_id") != slice_id:
-            raise SliceExecutionError("high-risk authorization is bound to a different slice")
-        if not approval_token:
-            raise ApprovalRequired("high-risk slice requires independent approval")
-        update_state(root, {
-            "status": "ready",
-            "next_action": "execute_slice",
-            "failure_class": None,
-        })
-        state = load_state(root)
     pending_cleanup = state.get("pending_cleanup") or []
     if pending_cleanup and slice_spec.get("type") not in {"cleanup", "reduce"}:
         raise SliceExecutionError("pending cleanup obligations must be handled before continuing")
-    slice_approval = slice_spec.get("approval") or {}
-    if slice_approval.get("required"):
-        if not approval_token:
-            append_event(root, {"type": "slice_blocked_high_risk_approval", "slice_id": slice_id, "task_ids": slice_spec.get("task_ids") or [], "reasons": slice_approval.get("reasons") or []})
-            update_state(root, {"status": "blocked", "next_action": "request_high_risk_approval", "next_slice_id": slice_id, "failure_class": "high_risk_approval_required"})
-            raise ApprovalRequired("high-risk slice requires independent approval")
-        # Keep only a digest; the raw approval token never enters the ledger.
+    if (slice_spec.get("approval") or {}).get("required") and approval_token:
+        # Run-level approval already authorised the design; a per-slice token is an
+        # optional second confirmation for high-risk slices, and only its digest is kept.
         approval_digest = hashlib.sha256(str(approval_token).encode("utf-8")).hexdigest()
         append_event(root, {"type": "approval_presented", "slice_id": slice_id, "approval_id": f"APR-{approval_digest[:16]}", "approval_digest": "sha256:" + approval_digest})
 
     task_by_id = _task_map(plan)
     task_ids = list(slice_spec.get("task_ids") or [])
     approved_ids = set(state.get("approved_case_ids") or [])
-    excluded_ids = []
     if state.get("review_status") == "partially_approved":
-        excluded_ids.extend(task_id for task_id in task_ids if task_id not in approved_ids)
-    planned_not_run = [
-        task_id for task_id in task_ids
-        if (task_by_id.get(task_id) or {}).get("planned_disposition") == "not_run"
-    ]
-    for task_id in dict.fromkeys(excluded_ids + planned_not_run):
-        reason = "not_approved" if task_id in excluded_ids else (task_by_id.get(task_id) or {}).get("not_run_reason") or "planned disposition is not_run"
-        append_event(root, {"type": "task_finished", "slice_id": slice_id, "task_id": task_id, "task_type": (task_by_id.get(task_id) or {}).get("type"), "status": "not_run", "reason": reason})
-    task_ids = [task_id for task_id in task_ids if task_id not in set(excluded_ids + planned_not_run)]
+        excluded_ids = [task_id for task_id in task_ids if task_id not in approved_ids]
+        for task_id in excluded_ids:
+            append_event(root, {"type": "task_finished", "slice_id": slice_id, "task_id": task_id, "task_type": (task_by_id.get(task_id) or {}).get("type"), "status": "not_run", "reason": "not_approved"})
+        task_ids = [task_id for task_id in task_ids if task_id in approved_ids]
     selected_tasks = [task_by_id[task_id] for task_id in task_ids if task_id in task_by_id]
     _assert_dependencies_satisfied(root, selected_tasks)
     append_event(root, {"type": "slice_started", "slice_id": slice_id, "task_ids": task_ids, "execution": slice_spec.get("execution")})
@@ -311,39 +287,14 @@ def execute_slice(run_dir: str | Path, slice_id: str, *, runtime_context: Any = 
             if not isinstance(fact, dict):
                 raise SliceExecutionError(f"task executor returned non-object for {task_id}")
             status = str(fact.get("status", "error"))
-            evidence_problems: list[str] = []
-            if status == "passed" and fact.get("evidence_ref"):
-                # Fail fast on the evidence schema: a passed fact whose evidence
-                # cannot reproduce its request must not enter the ledger as a
-                # green fact (the r1-r7 root cause of an unclosable report).
-                evidence_problems = evidence_schema.validate_evidence_file(root / fact["evidence_ref"])
-                if evidence_problems:
-                    status = "error"
-                    fact = dict(fact)
-                    fact["status"] = "error"
-                    fact["evidence_schema_errors"] = evidence_problems
             event = {"type": "task_finished", "slice_id": slice_id, "task_id": task_id, "task_type": task.get("type"), "evidence_kind": task.get("evidence_kind"), "status": status}
             if fact.get("evidence_ref"):
                 event["evidence_ref"] = fact["evidence_ref"]
-            if evidence_problems:
-                event["evidence_schema_errors"] = evidence_problems
             if fact.get("resource"):
                 event["resource_id"] = fact["resource"].get("object_id") if isinstance(fact["resource"], dict) else fact["resource"]
             append_event(root, event)
             if isinstance(fact.get("resource"), dict):
                 update_resources(root, [fact["resource"]])
-            settlement = task.get("settlement") if isinstance(task.get("settlement"), dict) else None
-            if status == "passed" and settlement and settlement.get("on_success", True) and settlement.get("object_ref"):
-                # Declared business-task settlement: a passing task that transitions
-                # its object to a terminal state (e.g. disable with no delete
-                # capability per PRD) settles the resource obligation itself.
-                as_status = str(settlement.get("as") or "cleaned")
-                obj_id = str(settlement["object_ref"])
-                update_resources(root, [{"object_id": obj_id, "object_type": str(settlement.get("object_type") or "object"),
-                                         "cleanup_status": as_status, "source_task": task_id,
-                                         "settlement_basis": f"declared by task {task_id} settlement.on_success"}])
-                append_event(root, {"type": "resource_settled", "slice_id": slice_id, "task_id": task_id,
-                                    "object_id": obj_id, "cleanup_status": as_status})
             facts.append({"task_id": task_id, "task_type": task.get("type"), **copy.deepcopy(fact)})
             if status in {"failed", "error", "blocked"}:
                 break

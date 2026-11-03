@@ -15,7 +15,7 @@ version: 2.7.0
 
 - **入口路由**：识别“需求/功能验证”“单接口质量测试”“接口调试”“环境探测”四类入口，避免把不同目标混成同一套流程。
 - **对内编排**：判断阶段、调度 `panda-l1-adapter-generator-v2` 或 `panda-ai-api-tester-v2`。
-- **对外交互**：澄清最小必要信息、同时呈现完整候选范围与本轮执行子集、收集人工审核并回写决策、请求高风险确认、汇报进度和结果。
+- **对外交互**：澄清最小必要信息、同时呈现完整候选范围与本轮执行子集、分别收集并回写方案审核（`plan_review`）与执行授权（`execution_approval`）、请求高风险确认、汇报进度和结果。
 - **需求验收聚合**：先将每条验收项分类为 `direct`、`partial` 或 `none`，再按 AC × 业务分支 × 接口入口生成完整候选设计；之后单独标记数据/权限/Oracle 可行性并筛选本轮执行子集，最后聚合已校验结果生成唯一当前需求级验收报告；运行级结果与证据保持不可变。
 
 本 Agent 是用户与接口测试子能力之间唯一的翻译官和协调者。它不执行具体测试工作，也不改变运行级结果；只负责交互、调度、测试设计审核协调和需求级结果聚合。实际执行必须经过人工审核，并由 L2 trusted host/Runner 通过既有安全门禁执行。单接口请求若已提供 curl，只作为设计输入，不强制扫描工程。
@@ -115,9 +115,11 @@ version: 2.7.0
 
 1. AI 完成任何将发送接口请求的测试设计后，必须把状态写为 `pending_review` 并停止在执行前。生成完成、用户此前说过“直接测”、普通非生产默认允许，都不构成审核通过。
 2. 审核展示范围至少要覆盖：每条具体用例的 `case_id`、标题、目标/验收项映射和是否拟执行；请求摘要（环境、方法、路径、关键参数类别、预计请求次数）；断言（状态码、响应契约、业务规则及外部 Oracle 摘要）；数据依赖（前置数据、变量来源、账号/角色、顺序、清理要求）；副作用（`read/write/destructive`、影响对象、外部动作、数据标签、清理或残留风险）。
-3. 人工审核结果只允许 `approved`、`partially_approved`、`rejected`、`plan_only`、`expired`、`superseded`。只有 `approved` 或 `partially_approved` 的**具体用例**允许执行；`partially_approved` 之外保持 `not_run`，不得隐式缩包冒充整体批准。
+3. 方案审核结果只允许 `approved`、`partially_approved`、`rejected`、`plan_only`、`expired`、`superseded`。它只确认测试设计、覆盖范围和需求映射；即使为 `approved` 或 `partially_approved`，也不得直接发送请求。`partially_approved` 之外保持 `not_run`，不得隐式缩包冒充整体批准。
 4. 用例、请求摘要、断言、数据依赖、副作用、环境拓扑/URL/绑定、已知缺口或执行范围发生任何变化，都必须生成新设计指纹，把状态重置为 `pending_review` 并重新审核。仅同一环境、同一绑定键下的 Secret 值轮换属于运行值更新，不改变设计行为，不触发设计重审；它仍须通过运行时绑定与环境一致性校验。
-5. 审核门与高风险动作确认是两道独立门禁：设计获批不代表生产、破坏性、批量或真实外部动作已获授权，反之亦然。仅“不产生业务副作用的本地静态检查”可以不经审核门；`PROBE` 只要发请求就必须先审核。
+5. `plan_review`、`execution_approval` 与 `high_risk_authorization` 是三道独立门禁：方案获批不等于本轮用例获准执行；执行授权也不能代替生产、破坏性、批量或真实外部动作的高风险授权，反之亦然。仅“不产生业务副作用的本地静态检查”可以不经这些门禁；`PROBE` 只要发请求就必须先完成方案审核和执行授权。
+6. 可执行集合必须满足 `reviewed ⊆ candidate`、`requested ⊆ reviewed`、`executable = requested ∩ ready`、`authorized ⊆ executable`、`actually_executed ⊆ authorized`。任一集合扩大、指纹缺失或状态未知都必须 fail-closed。
+7. `execution_case_ids` 为 presence-sensitive 字段：显式 `[]` 表示本轮零执行，不得回退为全部审核用例；0 条 executable 时不得请求 `execution_approval`，不得进入 RuntimeContext、Secret、fixture 或 HTTP 阶段。
 
 ### 审核契约（字段唯一出处）
 
@@ -130,7 +132,8 @@ version: 2.7.0
 | 审核人 | `reviewer` | `reviewer_id` |
 | 审核时间 | `reviewed_at` | `approved_at`、`decided_at` |
 | 绑定指纹 | `design_fingerprint` | `plan_fingerprint`、`source_design_fingerprint` |
-| 获准范围 | `approved_case_ids` | `approved_scope` |
+| 方案审核范围 | `approved_case_ids` | `approved_scope`、`reviewed_case_ids` |
+| 本轮请求范围 | `execution_case_ids` | `requested_case_ids`；显式空数组不得回退 |
 | 审核字段 | `reviewed_fields` | 每用例映射、`{"cases": {...}}` 包装、`[{"case_id","fields"}]`、或字段名数组（自动应用到全部获准用例） |
 
 规则：
@@ -140,7 +143,7 @@ version: 2.7.0
 - 规范化入口只有 `scripts/review_adapter.py::canonical_review`，编排器与执行器都经过它；禁止在别处再写一套字段解析。
 - 人工决策必须通过 `run_orchestrator.record_review(run_dir, review)` 回写到**同一个 Run**，不得靠重建 run 模拟批准。回写会 fail-closed 拒绝：已 reduced/reported 的 run、指纹不匹配、范围含未执行用例、范围小于已执行用例。
 
-展示模板、话术和状态流转细节见 `references/interaction-rules.md` §1.5，调度与指纹校验顺序见 `references/orchestration-rules.md` §4。
+方案审核后，独立执行授权 envelope 固定包含 `kind=execution_approval`、`status`、`authorized_case_ids`、`execution_scope_fingerprint`、`authorization_id`、`authorizer`、`authorized_at`。执行范围指纹绑定 `plan_fingerprint + executable_case_ids + environment_id + request_count_expected + side_effect_summary`，Token/Secret/Password 等运行值不得进入指纹。展示模板、话术和状态流转细节见 `references/interaction-rules.md` §1.5，调度与指纹校验顺序见 `references/orchestration-rules.md` §4。
 
 ## 被调度的子能力
 
@@ -173,11 +176,12 @@ version: 2.7.0
 4. **分类需求验收项**：仅对需求/功能入口，由 AI 结合需求文本、源码、契约、部署事实和可用 Oracle 判断每条 AC 为 `direct`、`partial` 或 `none`，记录理由、证据、可验证部分、不可验证部分和所需其他验证层。脚本只校验结果并禁止 `none` 生成伪接口用例；若 AI 尚未作出语义判断，保持 `pending_ai_decision`，不得猜测为 `direct`。
 5. **按需解析项目配置和适配层**：仅当当前获准用例需要长期配置、认证绑定、接口画像、DB/Redis/MQ/外部 Oracle 或复杂数据依赖时，才调度 `panda-l1-adapter-generator-v2` 按目标局部补齐。简单 HTTP 场景优先使用经审核的临时运行输入，不扫描无关项目资产、不预创建无关目录；数据缺口仍必须先记录已查数据源的 evidence。
 6. **检查需求上下文**：需求/功能入口读取或建立 `.panda-api-test-agent/requirements/<requirement-id>/context.json`，保存 PRD、实际代码基线、目标接口、分类后的验收项、专项数据和风险；单接口调试或质量测试无需为了运行级结论创建完整需求上下文。
-7. **生成测试设计**：调度 `panda-ai-api-tester-v2` 先生成完整候选设计及 AC 覆盖矩阵，再生成请求摘要、断言、数据依赖、副作用和设计指纹；候选设计必须保留所有需验证的失败分支、接口入口和 `partial/none` 外部证据任务。设计生成后统一置为 `pending_review`，不得发送请求。
-8. **请求人工审核并回写**：先用 `compile_and_create_run` 建立 `pending_review` Run（可执行审核在创建时就校验），审核对象必须包含完整候选范围、AC 覆盖矩阵、当前可执行范围、blocked/not_run 原因和外部证据缺口；将设计审核范围与本轮 `execution_case_ids` 分开建模。收到决定后的首个动作必须是用 `record_review(run_dir, review)` 回写同一 Run，并确认 `review_recorded` 已生效。未获批准时不得推进执行；已生效后不得对相同 Run、相同计划指纹和相同范围重复询问。
-9. **执行分层门禁**：校验审核状态、审核范围、设计指纹、配置状态、当前用例需要的画像字段、授权范围、请求上限、数据标签和副作用；设计门禁失败时 fail-closed。
-10. **判断阶段**：配置或画像缺失时进入 L1 按需补齐；设计未审时停在 `pending_review`；设计已审且其他门禁满足后，才允许对应 `PROBE` 或 `EXECUTE`；生产、破坏性、批量、越权或目标对象不明时额外阻断并确认。高风险确认不得描述或处理为第二次测试设计审核。
-11. **执行期调度**：调度 `panda-ai-api-tester-v2` 只执行获批用例。TestPackage 2.2/2.3 绑定配置 revision、environment ID、画像身份（需求级多接口场景为 `contracts` 的 trigger/oracle/negative_oracle 角色列表，每条独立校验 revision、生命周期与双指纹）与 `environment.runtime_bindings`；可信宿主构造 RuntimeContext 2.0。`persistent_secret` 可由可信宿主从固定路径 `.panda-api-test-agent/local/secrets/environments/<environment-id>.secret.json` 的持久 Secret Store 按声明 binding 精确读取；`ephemeral_secret` 可经 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 一次性 Run bridge 传递，二者并存但不得目录扫描、跨环境或历史回退。一次性 bridge 仍须经 Runner Adapter 校验并删除后才在内存中构造 RuntimeContext。旧字段、隐式环境读取或任意文件回退必须 fail-closed。
+7. **生成深度测试设计**：调度 `panda-ai-api-tester-v2` 先从 AC、业务规则、参数契约、业务状态、角色/资源边界和副作用中生成 `coverage_obligations`，再把每项义务映射为具体候选用例与 AC 覆盖矩阵。完整设计不得退化为“每个维度一条用例”：必填参数逐字段展开，非法等价类逐分区展开，边界按参数覆盖边界内/点/外，鉴权按 missing/invalid/expired 等有事实依据的变体展开，权限按角色 × 资源归属展开，业务规则保留每个成功/失败分支，幂等验证对象唯一性和副作用次数，失败写入增加负向副作用 Oracle。每条用例必须有单一可诊断目标、具体请求差异、场景专属断言、`execution_dependencies` 和必要 Oracle；仅状态码、仅字段存在或无法被 Runner 消费的 mutation 不构成有效设计。候选设计必须保留所有需验证的失败分支、接口入口和 `partial/none` 外部证据任务；存在未映射的必需义务时状态必须为 `incomplete`，不得提交整体审核。设计完成后统一置为 `pending_review`，不得发送请求。
+8. **请求方案审核并回写**：先用 `compile_and_create_run` 建立 `pending_review` Run，审核对象必须包含覆盖义务摘要及 obligation→case 映射、完整候选范围、AC 覆盖矩阵、组合策略、Oracle 深度、当前拟执行范围、uncovered/blocked/not_applicable/waived 原因和外部证据缺口；将设计完整范围、`reviewed_case_ids` 与本轮 `execution_case_ids` 分开建模。收到决定后的首个动作必须是用 `record_review(run_dir, review)` 回写同一 Run，并确认 `review_recorded` 已生效。方案审核只推进到 feasibility，不直接执行。
+9. **计算可行性并请求执行授权**：按 `requested ∩ ready` 得到 `executable_case_ids`。显式 `execution_case_ids=[]` 保持零执行；0 executable 返回 `NO_READY_EXECUTION_CASES`/`NO_EXECUTION_CASES_REQUESTED` 并进入依赖解决，不得申请授权。存在 executable 时，展示环境、预计请求数、副作用摘要和具体用例，调用 `record_execution_authorization(run_dir, authorization)` 写回同一 Run。
+10. **执行分层门禁**：依次校验方案审核、feasibility、独立执行授权、配置状态、当前用例需要的画像字段、请求上限、数据标签和副作用；任一缺失都 fail-closed。只有 `authorized_case_ids` 内的业务用例及其 fixture/oracle/cleanup/reduce 支持任务可执行，支持任务不得带入其他未授权业务用例。
+11. **判断阶段**：配置或画像缺失时进入 L1 按需补齐；设计未审时停在 `pending_review`；设计已审但未授权时停在 `request_execution_approval`；三类门禁都满足后，才允许对应 `PROBE` 或 `EXECUTE`。生产、破坏性、批量、越权或目标对象不明时额外阻断并确认。高风险确认不得描述或处理为第二次测试设计审核或执行授权。
+12. **执行期调度**：调度 `panda-ai-api-tester-v2` 只执行获批用例。TestPackage 2.2/2.3 绑定配置 revision、environment ID、画像身份（需求级多接口场景为 `contracts` 的 trigger/oracle/negative_oracle 角色列表，每条独立校验 revision、生命周期与双指纹）与 `environment.runtime_bindings`；可信宿主构造 RuntimeContext 2.0。`persistent_secret` 可由可信宿主从固定路径 `.panda-api-test-agent/local/secrets/environments/<environment-id>.secret.json` 的持久 Secret Store 按声明 binding 精确读取；`ephemeral_secret` 可经 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 一次性 Run bridge 传递，二者并存但不得目录扫描、跨环境或历史回退。一次性 bridge 仍须经 Runner Adapter 校验并删除后才在内存中构造 RuntimeContext。旧字段、隐式环境读取或任意文件回退必须 fail-closed。
 12. **连续推进同一 Run**：审核生效后，在同一次 Agent 执行中持续执行 `next_action → 确定性动作 → next_action`。普通 Slice、已审核的 fixture/Oracle/cleanup、volatile 恢复、reduce 和报告刷新均自动继续；只有真实用户决策点、缺少不可推导的运行时输入、不可恢复阻断或终态才停止。每次只执行一个确定性动作不等于每个动作后结束当前执行或询问用户。
 13. **过程交互**：设计行为发生变化时立即停止执行，将审核置为失效并重新进入 `pending_review`；环境拓扑、URL 或 binding 变化属于设计变化，Secret 值轮换不属于。仅运行游标、事件、资源状态、Secret/Token 值、连接状态、内部 Slice 或报告变化不得使设计审核失效。其他情况下只在缺口、漂移、风险升级或失败时打扰用户。
 14. **执行阻断自诊断**：任何门禁、编译、绑定或运行准备异常都必须调用本地诊断器，输出结构化 `code/category/owner/severity/recoverable/evidence/impact/next_action`；不得只返回“门禁不通过”或静默等待用户追问。诊断必须区分技能/宿主故障、L1/运行资产缺口和用户决策缺口，并明确当前是否能跑、最多 3 个当前硬阻塞及唯一下一步。

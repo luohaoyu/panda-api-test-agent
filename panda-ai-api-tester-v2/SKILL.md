@@ -2,14 +2,14 @@
 name: panda-ai-api-tester-v2
 description: 读取工程 L1 适配层，以结构化 TestPackage 为核心执行接口门禁、即时验证和稳定回归晋级，输出确定性的 TestResult 与 HTML 报告。用户要求验证接口、测试业务链路、诊断接口环境或将稳定用例纳入 pytest/CI 时使用。；v2 架构升级版
 agent_created: true
-version: 2.6.1
+version: 2.5.1
 ---
 
 # AI API Tester
 
 ## 定位
 
-作为 L2 通用接口测试执行层，只读项目级多环境 `test-config.md` Schema 2.1、接口画像和需求 context，先从需求设计候选用例，再规划覆盖与执行依赖；数据、凭证、fixture、Oracle 或 cleanup 缺口只记录为规划事实，不在规划阶段停止流程。完成人工审核后，按审核批准范围执行最终可行性门禁，通过后构建 TestPackage 2.3（多契约）或 2.2（单契约），执行运行门禁或业务测试，保存结构化 TestResult，再通过固定报告器生成 HTML。Runner 仅兼容执行既有 TestPackage 2.1/2.2，不允许新建流程降级绕过规划与审核。
+作为 L2 通用接口测试执行层，只读项目级多环境 `test-config.md` Schema 2.1、接口画像和需求 context，先从需求设计候选用例，再规划覆盖与执行依赖；数据、凭证、fixture、Oracle 或 cleanup 缺口只记录为规划事实，不在规划阶段停止流程。完成人工审核后，按审核批准范围执行最终可行性门禁，通过后构建 TestPackage 2.2，执行运行门禁或业务测试，保存结构化 TestResult，再通过固定报告器生成 HTML。Runner 仅兼容执行既有 TestPackage 2.1，不允许新建流程借 2.1 绕过规划与审核。
 
 遵循 **AI 指令约束优先，脚本能力辅助**：AI/Skill 负责理解接口语义、判断质量维度适用性、设计断言和解释缺口；脚本只把 AI 已确认的设计结构化，执行请求，校验审核范围，保护凭据，统计结果和生成证据。没有 AI 语义决策时，脚本输出的质量维度只能是候选设计，不得直接作为已确认测试范围。运行验证只输出 runtime status、契约差异观察和证据，不回写项目配置或接口画像。
 
@@ -35,12 +35,7 @@ docs/
 ├── runs/
 │   └── <run-id>/
 └── local/
-    ├── secrets/
-    │   └── environments/
-    │       └── <environment-id>.secret.json
     └── runtime/
-        └── secrets/
-            └── <run-id>.secret.json
 ```
 
 禁止将状态目录写为 `.workbuddy/.panda-api-test-agent/` 或 `.workbuddy/panda-api-test-agent/`。`docs/` 保存项目级、接口级长期 L1 资产；`.panda-api-test-agent/` 保存需求级、运行级及本机临时运行资产，不得相互搬移或复制形成多个事实源。
@@ -56,11 +51,10 @@ docs/
 
 - `.panda-api-test-agent/requirements/<requirement-id>/case-design.json`：由需求/AC 推导的候选用例设计。
 - `.panda-api-test-agent/requirements/<requirement-id>/feasibility.json`：覆盖矩阵、执行依赖矩阵、待人工审核状态或审核后 `GATE-FEASIBILITY` 结果。
-- `.panda-api-test-agent/runs/<run-id>/package.json`：人工审核后，批准范围通过最终可行性门禁才构建的结构化 `TestPackage`；需求级多接口场景用 2.3 的 `contracts`（trigger / oracle / negative_oracle），单接口场景用 2.2 的单 `contract`。
+- `.panda-api-test-agent/runs/<run-id>/package.json`：人工审核后，批准范围通过最终可行性门禁才构建的结构化 `TestPackage 2.2`。
 - `.panda-api-test-agent/runs/<run-id>/result.json`：结构化 `TestResult`。
-- `.panda-api-test-agent/runs/<run-id>/evidence/`：按原样记录的请求、响应和断言证据。
-- `.panda-api-test-agent/local/secrets/environments/<environment-id>.secret.json`：可信宿主管理的环境级持久 Secret Store；仅保存该环境、当前包已声明为 `secret=true` 的 binding，固定精确路径读取，不扫描目录。
-- `.panda-api-test-agent/local/runtime/`：仅保存受控的本机运行时临时资产；其中 `secrets/<run-id>.secret.json` 保留单次、短 TTL、读取即删除的 run bridge，不得保存项目配置、接口画像或可长期复用测试事实。
+- `.panda-api-test-agent/runs/<run-id>/evidence/`：脱敏请求、响应和断言证据。
+- `.panda-api-test-agent/local/runtime/`：仅保存受控的本机运行时临时资产；不得保存项目配置、接口画像或可长期复用测试事实。
 - `reports/<run-id>.html`：由 `scripts/render_report.py` 从 `result.json` 确定性生成。
 - `tests/generated/`：仅 `PROMOTE` 模式生成 pytest 薄适配器。
 
@@ -103,7 +97,7 @@ docs/
 5. 用例已在 `EXECUTE` 模式至少真实通过一次。
 6. 用户明确要求沉淀回归、生成 pytest 或接入 CI。
 
-`PROMOTE` 只生成薄适配器：从 `TestPackage` 参数化加载用例并调用公共 Runner。禁止为每个用例复制 HTTP 客户端和报告逻辑。生成后必须完成语法检查和 pytest collect；可用环境具备时再复跑，collect 成功不等于业务通过。
+`PROMOTE` 只生成薄适配器：从 `TestPackage` 参数化加载用例并调用公共 Runner。禁止为每个用例复制 HTTP 客户端、脱敏和报告逻辑。生成后必须完成语法检查和 pytest collect；可用环境具备时再复跑，collect 成功不等于业务通过。
 
 ## 模式选择
 
@@ -116,25 +110,25 @@ docs/
 ## 核心流程
 
 1. **REQUIREMENT**：绑定当前工作区、项目标识、需求 ID、运行边界和输出目录；提取 AC、业务规则、风险与专项限制。
-2. **CASE DESIGN**：先从需求/AC/业务规则按 AC × 业务失败分支 × 接口入口设计完整候选用例。候选用例描述验证目标、业务前置状态、请求、断言和 Oracle；不得因尚无真实数据就省略用例，也不得把候选用例称为已可执行。
-3. **FEASIBILITY / DATA PLAN**：逐条分析候选用例的数据、凭证、环境、fixture、Oracle 和 cleanup 依赖，生成 `coverage_map` 与 `dependency_matrix`。每条候选用例必须显式声明 `execution_dependencies`；无额外依赖时写空数组。缺少数据或执行事实时记录 `status=blocked`、`known_gap`、责任人和下一步，但规划必须继续完成；此时仅本轮 `execution_case_ids` 受影响，候选和完整审核范围必须保留，并将用例标记 `planned_disposition=not_run`；不得把数据缺口误报为流程失败，也不得用 `partially_approved` 掩盖完整设计范围。
+2. **CASE DESIGN**：先从需求/AC/业务规则设计候选用例。候选用例描述验证目标、业务前置状态、请求、断言和 Oracle；不得因尚无真实数据就省略用例，也不得把候选用例称为已可执行。
+3. **FEASIBILITY / DATA PLAN**：逐条分析候选用例的数据、凭证、环境、fixture、Oracle 和 cleanup 依赖，生成 `coverage_map` 与 `dependency_matrix`。每条候选用例必须显式声明 `execution_dependencies`；无额外依赖时写空数组。缺少数据或执行事实时记录 `status=blocked`、`known_gap`、责任人和下一步，但规划必须继续完成；此时门禁为 `pending_review`，不得把数据缺口误报为流程失败。
 4. **HUMAN REVIEW**：向审核人提交完整候选范围、依赖矩阵和覆盖边界。审核人决定全量批准、只批准依赖已闭合的子集、暂缓部分用例、驳回或要求补充。审核范围外用例保留为 `not_run`/未覆盖边界，不得静默删除。
 5. **FINAL GATE-FEASIBILITY**：在任何 RuntimeContext、Secret envelope、fixture 或 HTTP 之前，按人工审核批准范围计算最终静态门禁。只有批准范围仍包含 `candidate_only`、未声明依赖、未解决依赖、未知 case 依赖或依赖环时，才停止在 Package Build 前。若人工只批准依赖已闭合的子集，则门禁通过并继续该子集，但不得宣称完整需求通过。
-6. **PACKAGE BUILD**：只有人工审核完成且最终门禁通过后，才调用 `compile_approved_package(..., feasibility_plan=plan)` 构建 TestPackage，并绑定配置 revision、画像身份（需求级场景为 `contracts` 角色列表）、审核范围、可行性快照及源指纹。既有 2.1/2.2 包只做兼容执行；新包不得降级绕过规划、审核或门禁。
+6. **PACKAGE BUILD**：只有人工审核完成且最终门禁通过后，才调用 `compile_approved_package(..., feasibility_plan=plan)` 构建 TestPackage 2.2，并绑定配置 revision、画像身份、审核范围、可行性快照及源指纹。既有 2.1 包只做兼容执行；新包不得降级到 2.1 绕过规划、审核或门禁。
 7. 选择 `PROBE` 或 `EXECUTE`；允许 `minimally_usable` 画像支持受控、局部执行，但必须披露治理和完整覆盖边界。
 8. 执行运行时门禁：环境、契约、鉴权、授权、请求上限、fixture 和清理能力。门禁未通过时只停止受影响步骤，将用例标记 `not_run` 并保存原因。
-9. 当前范围门禁满足后，可信宿主调用 `execute_test_package(..., runtime_values=values)`；宿主在内存中构造 RuntimeContext 2.0。既有 `run_pipeline(...)` 继续只负责旧 HTTP 直跑流程，不得为接入 Oracle 而改变其行为；统一编排器调用 `slice_executor.execute_package_slice(...)` 时，为 Oracle slice 显式注入 `composite_oracle_executor(...)`，按 DAG 执行请求、变量提取、DB/Redis 只读核对、数据准备和 teardown。
+9. 当前范围门禁满足后，可信宿主调用 `execute_test_package(..., runtime_values=values)`；宿主在内存中构造 RuntimeContext 2.0 并调用 `run_pipeline(...)`，按 DAG 执行请求、变量提取、断言、数据准备和 teardown。
 10. Runner 原子写入结构化 `TestResult`，包含最终可行性门禁和 Package Build 快照；通过 `validate_result.py` 校验并由 `render_report.py` 确定性生成 HTML。报告必须区分候选用例、审核批准用例、当前可执行用例、审核范围外用例和完整需求覆盖。
 11. **REPORT / PROMOTE**：先报告当前运行事实；`PROMOTE` 不重跑业务请求，只消费已有通过结果，验证稳定契约、清理和阻断缺口后执行语法/collect。
 
 ## 候选用例与 TestPackage 要求
 
-候选用例先于 FeasibilityPlan，FeasibilityPlan 先于人工审核，人工审核先于最终 TestPackage。不得颠倒为“先有 PLAN 再设计用例”，不得在数据规划阶段因缺少真实数据而停止流程，也不得跳过规划或人工审核直接建包。审核对象必须同时展示完整候选设计、AC 覆盖矩阵、本轮执行子集和 blocked/not_run 原因。
+候选用例先于 FeasibilityPlan，FeasibilityPlan 先于人工审核，人工审核先于最终 TestPackage。不得颠倒为“先有 PLAN 再设计用例”，不得在数据规划阶段因缺少真实数据而停止流程，也不得跳过规划或人工审核直接建包。
 
 每条进入批准范围的候选用例至少声明：
 
 - `case_id`、需求/规则/场景引用和 `depends_on`。
-- `execution_dependencies`：数据、凭证、环境、fixture、Oracle、cleanup；状态为 `resolved|not_required|blocked`。`blocked` 在规划阶段只表示当前不可执行，不等于整个流程失败；数据 blocked 必须带数据源检查 evidence，且候选保留为 `planned_disposition=not_run`。
+- `execution_dependencies`：数据、凭证、环境、fixture、Oracle、cleanup；状态为 `resolved|not_required|blocked`。`blocked` 在规划阶段只表示当前不可执行，不等于整个流程失败。
 - 候选适用性；`candidate_only=true` 时不得进入人工批准的可执行范围。
 
 TestPackage 中每条可执行用例至少声明：
@@ -174,16 +168,15 @@ TestPackage 中每条可执行用例至少声明：
 
 - 禁止 mock 被测对象。
 - 禁止只断 HTTP 200；至少断 HTTP、业务 code 和关键字段。
-- Base URL、认证、Origin 白名单、只读操作白名单和命名 DB/Redis 资源只允许由 `environment.runtime_bindings` 声明；DB 放在 `databases.<name>` 且 `format=db_config`，Redis 放在 `redis.<name>` 且 `format=redis_config`，每项都声明 `key/required/secret/format`。宿主用相同 key 构造 RuntimeContext 2.0，结构值必须复制隔离并深层只读。`secret=false` 的稳定非敏感 `value` 从 canonical `docs/test-config.md` 的目标环境读取；Secret 从环境级持久 Store 读取，可由当前 run bridge 覆盖；宿主显式 `runtime_values` 仅可覆盖非敏感 config value。未声明值一律拒绝，运行值不得进入包或报告。
+- Base URL、认证、Origin 白名单和只读操作白名单只允许由 `environment.runtime_bindings` 声明；宿主用相同 key 构造 RuntimeContext 2.0。值不得进入包、证据或报告。
 - HTTP、认证、DB、Redis、MQ 必须来自同一环境节点；禁止跨环境资源拼接。
 - `config_status` 和画像 lifecycle/revision/指纹由 L1 维护；本 skill 只输出 `runtime_status` 与结构化契约差异观察，认证/连接失败不得自动标为配置或画像漂移。
-- 允许用户明确授权的 DB/Redis/认证 Secret 明文保存在固定 `.panda-api-test-agent/local/secrets/environments/<environment-id>.secret.json` 环境 Store；可信宿主必须校验项目根、`environment_id` 和包声明的 Secret binding，原子写入、精确读取、防路径逃逸且禁止目录扫描。固定 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 继续作为 Host-private ephemeral run bridge：绑定运行、环境、包指纹与短 TTL，只含已声明 Secret binding，读取即删除，可覆盖持久 Store。其他落盘方式仍禁止。生产/疑似生产隔离；写请求未知交付状态禁止自动重试。
+- 凭据默认经宿主内存注入；允许固定 `.panda-api-test-agent/local/runtime/secrets/{run_id}.secret.json` 作为唯一的 Host-private ephemeral secret file 例外。该文件必须绑定运行、环境、包指纹与短 TTL，只含已声明 Secret binding，由可信宿主校验并删除后才构造 RuntimeContext；其他落盘方式仍禁止。生产/疑似生产隔离；写请求未知交付状态禁止自动重试。
 - 禁止创建、修改、修正或覆盖 `docs/interface-profile/*.md`。实际响应与画像不一致时，记录期望、实际、证据引用、候选分类和责任人，并交由主 Agent 调度 L1 复核；不得为了让用例通过而修改预期。
-- 画像治理块可选的 `facts:` 引用只做消费校验：`lifecycle=executable` 时每条必须 `confirmed` 且带 `confirmed_by`，否则以 `PROFILE_FACTS_UNCONFIRMED` 阻断；本 skill 不创建、不确认、不回写事实账本 `docs/scan-facts/ledger.jsonl`。
 - DB/Redis/审计未启用时记录 `not_enabled` 或覆盖缺口，不得记为通过。
 - 普通非生产写操作默认允许，但优先使用可验证 teardown；无法清理时必须进入结果和待处理对象清单，标记残留风险，不能将运行标记为完整通过。批量、destructive、生产/疑似生产和真实外部动作必须阻断或确认。
 - 清理失败必须进入结果和待处理清单；风险豁免必须标记为 `waived`/“已风险豁免”，不能称为清理通过，且有豁免或残留对象时最终 verdict 不得为 `passed`。
-- 请求、响应和证据按原样写入，不做遮蔽；含凭据的报文只存在于运行产物中。
+- 请求、响应和证据必须脱敏。
 - 任何会发送 HTTP 请求的 `PROBE` 和 `EXECUTE` 正式请求必须由确定性 Runner 执行，且先通过人类测试设计审核；Agent 只生成/审核 TestPackage、由宿主显式构造并传入已授权 RuntimeContext 2.0、解释结果。pipeline 和 ApiTestRunner 继续只接收显式 RuntimeContext；可信宿主可在 pipeline 前消费固定 local Secret bridge。`os.environ`、stdin、argv、任意文件、目录扫描和历史文件回退仍禁止。
 - HTTP 写夹具仍必须声明 `cleanup_extract`、`object_ref` 与 teardown；普通单次写用例优先如此。若业务链路无法提供 teardown，可使用严格 case-level `cleanup_waiver` 或运行级残留登记：必须是非生产、非批量、单次、带有效 `data_tag` 和静态 `object_ref`，并在结果中标记残留风险；不得用于 destructive、生产/疑似生产、真实外部动作或 PROMOTE。
 - Agent 不得自由编写正式报告；正式 HTML 必须由固定报告器从已校验的 `result.json` 生成。
@@ -225,12 +218,7 @@ TestPackage 中每条可执行用例至少声明：
 - 可行性规划器：`scripts/feasibility_plan.py`（纯本地静态计算，不接触运行时值）
 - 测试包编译器：`scripts/package_compiler.py`（只接受已审核且可行性门禁通过的设计）
 - 确定性执行内核：`scripts/runner.py`（仅同进程 Python API）
-- DB Oracle 只读执行器：`scripts/db_oracle.py`（oracle 任务的 DB 核对；兼容旧 DSN 字符串和内存结构化 `db_config`；声明静态白名单 + 只读连接 + 断言复用 Runner 算子）
-- Redis Oracle 只读执行器：`scripts/redis_oracle.py`（只允许显式白名单读命令，限制 `max_items/max_bytes`，断言复用 Runner 算子）
-- Oracle 组合执行器：`scripts/composite_oracle_executor.py`（统一编排器注入 `slice_executor`，仅按显式 `oracle_type=db|redis` 分派；未知/free-form Oracle 不得误走内建执行器）
-- 环境 Secret Store：`scripts/environment_secret_store.py`（固定环境路径、声明校验、原子写入与精确读取）
-- 运行值解析：`scripts/runtime_value_resolver.py`（config value → 持久 Secret → run bridge → 显式非敏感覆盖）
-- 可信宿主入口：`scripts/trusted_host.py`（先执行 package preflight，再解析运行值并构造 RuntimeContext 2.0，记录阶段耗时与安全阻断结果）
+- 可信宿主入口：`scripts/trusted_host.py`（接收内存运行值、构造 RuntimeContext 2.0、记录阶段耗时与安全阻断结果）
 - 流水线入口：`scripts/run_pipeline.py`（仅可信宿主传入 RuntimeContext 2.0；CLI fail-closed）
 - 运行时上下文：`scripts/runtime_context.py`
 - Bash 包装入口：`scripts/run_tests.sh`

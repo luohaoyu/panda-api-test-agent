@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0",
+  "evaluation_id": "SELF-EVAL-SAQ-DEPTH-001",
+  "title": "单接口测试设计深度与防浅化契约",
+  "skill": "panda-api-test-agent-v2",
+  "network_policy": "stub_only",
+  "external_side_effects_allowed": false,
+  "synthetic_interface_profile": {
+    "method": "POST",
+    "path": "/orders",
+    "parameters": [
+      {"name": "user_id", "required": true, "type": "string", "invalid_examples": [123]},
+      {"name": "quantity", "required": true, "type": "integer", "boundary": {"min": 1, "max": 10}, "invalid_examples": ["x"]},
+      {"name": "channel", "required": false, "type": "string", "invalid_examples": ["UNKNOWN"]}
+    ],
+    "response": {"status": 201, "business_code": 0, "body_fields": ["order_id", "status"]},
+    "authentication": {"type": "bearer", "test_variants": ["missing", "invalid", "expired"]},
+    "authorization": {"test_scenarios": ["allowed_role", "out_of_scope_resource"]},
+    "idempotency_applicable": true,
+    "idempotency": {"test_variants": ["same_key_same_payload", "same_key_different_payload"]},
+    "side_effect": "write",
+    "teardown": {"type": "stub", "verify_absent": true}
+  },
+  "expected_design_depth": {
+    "coverage_model": "obligation_driven",
+    "required_parameters_independently_omitted": ["user_id", "quantity"],
+    "quantity_boundary_values": [0, 1, 10, 11],
+    "authentication_variants": ["missing", "invalid", "expired"],
+    "authorization_scenarios": ["allowed_role", "out_of_scope_resource"],
+    "idempotency_variants": ["same_key_same_payload", "same_key_different_payload"],
+    "every_case_requires": [
+      "coverage_obligation_refs",
+      "scenario_type",
+      "execution_dependencies",
+      "request",
+      "assertions"
+    ],
+    "required_assertion_types": ["http_status", "business_code", "key_fields"]
+  },
+  "forbidden_designs": [
+    "一个请求同时省略多个必填参数并宣称逐字段覆盖",
+    "一个边界用例同时塞入多个参数和多个边界点",
+    "用 missing_or_invalid 一个请求宣称覆盖无凭证和无效凭证",
+    "只断言 HTTP 状态码",
+    "只检查核心业务字段存在而不检查值语义或状态 Oracle",
+    "存在未映射必需覆盖义务仍标记设计完整"
+  ],
+  "regression_targets": [
+    "用例数量由覆盖义务决定，不与维度数量固定相等",
+    "必填参数、边界点和鉴权变体分别生成可诊断用例",
+    "每条用例携带覆盖义务、场景类型和执行依赖",
+    "单接口质量结果不得享受只要求 http_status 的断言豁免",
+    "设计完整性与当前可执行性分开"
+  ]
+}

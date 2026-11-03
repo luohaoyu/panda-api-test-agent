@@ -51,6 +51,11 @@ def _run(root, run_id, tasks, *, criteria, verdict="passed", requirement_id="REQ
         "started_at": "2026-11-02T10:00:00+08:00",
         "environment_snapshot": {"environment_id": "test"},
     }, ensure_ascii=False), encoding="utf-8")
+    for task in tasks:
+        for ref in task.get("evidence_refs", []):
+            evidence_path = root / ref
+            evidence_path.parent.mkdir(parents=True, exist_ok=True)
+            evidence_path.write_text("{}", encoding="utf-8")
     return root
 
 

@@ -15,9 +15,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-from db_oracle import DbOracleError, declaration_from_task as db_declaration_from_task, validate_db_oracle
-from redis_oracle import RedisOracleError, declaration_from_task as redis_declaration_from_task, validate_redis_oracle
-
 
 class PlanCompileError(ValueError):
     """Raised when an intent cannot be compiled safely."""
@@ -251,29 +248,6 @@ def _validate_task(task: dict[str, Any], mode: str, known_ids: set[str]) -> dict
         raise PlanCompileError(f"fixture task {task_id} requires fixture_name, fixture, or action")
     if task_type == "oracle" and not (task.get("oracle_type") or task.get("oracle") or task.get("verification")):
         raise PlanCompileError(f"oracle task {task_id} requires oracle_type, oracle, or verification")
-    if task_type == "oracle":
-        oracle_type = str(task.get("oracle_type") or "").strip().lower()
-        if not oracle_type and isinstance(task.get("oracle"), dict):
-            oracle_type = str(task["oracle"].get("kind") or "").strip().lower()
-        if oracle_type == "db":
-            declaration = db_declaration_from_task(task)
-            # Legacy free-form DB verification blobs without a statement remain
-            # compatible, but are not eligible for the built-in DB executor.
-            if declaration is not None and declaration.get("statement"):
-                try:
-                    validate_db_oracle(declaration)
-                except DbOracleError as exc:
-                    raise PlanCompileError(f"oracle task {task_id}: {exc}") from exc
-                task["builtin_oracle_executor"] = "db"
-        elif oracle_type == "redis":
-            declaration = redis_declaration_from_task(task)
-            # Apply the same compatibility rule to old free-form Redis blobs.
-            if declaration is not None and declaration.get("command"):
-                try:
-                    validate_redis_oracle(declaration)
-                except RedisOracleError as exc:
-                    raise PlanCompileError(f"oracle task {task_id}: {exc}") from exc
-                task["builtin_oracle_executor"] = "redis"
     if task_type == "cleanup" and not (task.get("object_ref") or task.get("cleanup") or task.get("action")):
         raise PlanCompileError(f"cleanup task {task_id} requires object_ref, cleanup, or action")
     task["evidence_kind"] = {
@@ -289,13 +263,7 @@ def _validate_task(task: dict[str, Any], mode: str, known_ids: set[str]) -> dict
 
 
 def compile_plan(intent: dict[str, Any]) -> dict[str, Any]:
-    """Compile a validated intent without touching the filesystem.
-
-    ``candidate_cases`` is the complete design set. ``tasks`` is the scheduled
-    execution representation and must not silently omit a candidate. A blocked
-    candidate stays in ``tasks`` with a planned ``not_run`` disposition; data
-    readiness is evaluated later by the feasibility planner.
-    """
+    """Compile a validated intent without touching the filesystem."""
     if not isinstance(intent, dict):
         raise PlanCompileError("TestIntent must be an object")
     requirement_id = intent.get("requirement_id")
@@ -310,41 +278,12 @@ def compile_plan(intent: dict[str, Any]) -> dict[str, Any]:
     raw_tasks = intent.get("tasks")
     if not isinstance(raw_tasks, list) or not raw_tasks:
         raise PlanCompileError("tasks must be a non-empty list")
-    candidate_cases = intent.get("candidate_cases")
-    if candidate_cases is None:
-        candidate_cases = intent.get("cases")
-    if candidate_cases is not None:
-        if not isinstance(candidate_cases, list) or any(not isinstance(item, dict) for item in candidate_cases):
-            raise PlanCompileError("candidate_cases must be a list of objects")
-        candidate_ids = [item.get("case_id") or item.get("task_id") for item in candidate_cases]
-        task_ids = [item.get("case_id") or item.get("task_id") for item in raw_tasks if isinstance(item, dict)]
-        if any(not isinstance(item, str) or not item for item in candidate_ids):
-            raise PlanCompileError("candidate_cases require non-empty case_id or task_id")
-        if len(candidate_ids) != len(set(candidate_ids)):
-            raise PlanCompileError("candidate case IDs must be unique")
-        if not set(task_ids).issubset(set(candidate_ids)):
-            raise PlanCompileError(
-                "CANDIDATE_EXECUTION_SET_MISMATCH: execution tasks must be declared in candidate_cases"
-            )
-        execution_ids = set(task_ids)
-        for candidate in candidate_cases:
-            candidate_id = candidate.get("case_id") or candidate.get("task_id")
-            if candidate_id in execution_ids:
-                continue
-            blocked = copy.deepcopy(candidate)
-            blocked.setdefault("task_id", candidate_id)
-            blocked.setdefault("case_id", candidate_id)
-            blocked.setdefault("type", "business")
-            blocked["planned_disposition"] = "not_run"
-            raw_tasks.append(blocked)
     _validate_semantic_decisions(intent, raw_tasks)
     raw_ids = [item.get("task_id") or item.get("case_id") if isinstance(item, dict) else None for item in raw_tasks]
     if any(not item for item in raw_ids) or len(raw_ids) != len(set(raw_ids)):
         raise PlanCompileError("task IDs must be non-empty and unique")
     known_ids = set(raw_ids)
     tasks = [_validate_task(item, mode, known_ids) for item in raw_tasks]
-    candidate_cases = copy.deepcopy(candidate_cases if candidate_cases is not None else tasks)
-    candidate_case_ids = [item.get("case_id") or item.get("task_id") for item in candidate_cases]
     levels = _topological_levels(tasks)
     task_by_id = {task["task_id"]: task for task in tasks}
     slices: list[dict[str, Any]] = []
@@ -359,11 +298,7 @@ def compile_plan(intent: dict[str, Any]) -> dict[str, Any]:
             "type": slice_type,
             "task_ids": level,
             "execution": "parallel" if parallel else "serial",
-            "approval": {
-                "required": any(task["approval"]["required"] and task["approval"].get("reasons") for task in ordered),
-                "task_ids": [task["task_id"] for task in ordered if task["approval"]["required"] and task["approval"].get("reasons")],
-                "reasons": sorted({reason for task in ordered for reason in (task["approval"].get("reasons") or [])}),
-            },
+            "approval": {"required": any(task["approval"]["required"] for task in ordered), "task_ids": [task["task_id"] for task in ordered if task["approval"]["required"]]},
             "resource_locks": sorted({lock for task in ordered for lock in task["resource_locks"]}),
             "volatile": any(task["volatile"] for task in ordered),
         })
@@ -380,10 +315,7 @@ def compile_plan(intent: dict[str, Any]) -> dict[str, Any]:
         "acceptance_criteria": copy.deepcopy(acceptance),
         "source_fingerprints": copy.deepcopy(intent.get("source_fingerprints") or {}),
         "risk_policy": copy.deepcopy(intent.get("risk_policy") or {}),
-        "candidate_cases": candidate_cases,
-        "candidate_case_ids": candidate_case_ids,
         "tasks": tasks,
-        "execution_task_ids": [task["task_id"] for task in tasks],
         "slices": slices,
         "cleanup_obligations": {
             # ``task_ids`` lists the cleanup tasks themselves; ``residual_task_ids``

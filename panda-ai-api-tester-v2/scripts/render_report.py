@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 TEMPLATE_ID = "panda-run-report"
-TEMPLATE_VERSION = "1.3.0"  # 1.3.0: 用例卡片直接嵌入原始请求/响应摘要（路线B），报文按原样展示
+TEMPLATE_VERSION = "1.2.0"  # 1.2.0: 用例卡片嵌入脱敏后的原始请求/响应摘要（路线B）
 
 
 def _load_report_base_css():
@@ -44,7 +44,7 @@ STATUS_LABELS = {
     "none": "无副作用",
     "waived": "已风险豁免",
 }
-VALIDATOR_SHA256 = "07e30f62c8ee90c33002ecc72c51be1b6d28bd7b3f8eb3655696bbf3cc396edc"
+VALIDATOR_SHA256 = "1d29f40613d3afc4a1b761dbce7523b41e62a9bb15bad54fd70910145bd15523"
 
 VERDICT_LABELS = {
     "passed": ("PASS", "全部必需验证已通过"),
@@ -125,15 +125,32 @@ def classification_badge(value):
     return f'<span class="classification">{esc(CLASSIFICATION_LABELS.get(value, value))}</span>'
 
 
+SENSITIVE_HEADER_RE = re.compile(
+    r"authorization|cookie|proxy-authorization|api-?key|token|secret|password", re.I)
+SENSITIVE_BODY_KEY_RE = re.compile(
+    r"^(authorization|auth|token|access_?token|refresh_?token|id_?token|secret|password|passwd|pwd|api_?key|cookie|set-?cookie|credential)s?$", re.I)
 MAX_EMBED_CHARS = 1600
 
 
+def _redact_json(obj):
+    """递归遮蔽敏感键的值；键名保留，值替换为 ***。"""
+    if isinstance(obj, dict):
+        return {
+            key: ("***" if SENSITIVE_HEADER_RE.search(str(key)) or SENSITIVE_BODY_KEY_RE.search(str(key))
+                  else _redact_json(value))
+            for key, value in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_redact_json(item) for item in obj]
+    return obj
+
+
 def _render_payload(body):
-    """把请求/响应体转为展示文本，超长截断并标注。"""
+    """把请求/响应体转为脱敏后的展示文本，超长截断并标注。"""
     if body is None:
         return None
     if isinstance(body, (dict, list)):
-        text = json.dumps(body, ensure_ascii=False, indent=2)
+        text = json.dumps(_redact_json(body), ensure_ascii=False, indent=2)
     else:
         text = str(body)
     if len(text) > MAX_EMBED_CHARS:
@@ -146,7 +163,11 @@ def _normalize_runner_exchange(exchange, label):
     if not isinstance(exchange, dict):
         return None
     headers = exchange.get("request_headers")
+    if isinstance(headers, dict):
+        headers = {k: ("***" if SENSITIVE_HEADER_RE.search(str(k)) else v) for k, v in headers.items()}
     resp_headers = exchange.get("response_headers")
+    if isinstance(resp_headers, dict):
+        resp_headers = {k: ("***" if SENSITIVE_HEADER_RE.search(str(k)) else v) for k, v in resp_headers.items()}
     return {
         "label": label,
         "method": exchange.get("method"),
@@ -161,7 +182,7 @@ def _normalize_runner_exchange(exchange, label):
 
 
 def load_http_exchanges(result_path, case_id, evidence_refs=None):
-    """加载用例的原始请求/响应流水。
+    """加载用例的原始请求/响应流水（脱敏后）。
 
     支持两种证据约定，按优先级：
     1. runner 约定：case.evidence_refs 指向 evidence/*.json，payload 含 exchange 字段；
@@ -192,6 +213,9 @@ def load_http_exchanges(result_path, case_id, evidence_refs=None):
         req = record.get("request") or {}
         resp = record.get("response") or {}
         headers = req.get("headers")
+        if isinstance(headers, dict):
+            headers = {k: ("***" if SENSITIVE_HEADER_RE.search(str(k)) else v)
+                       for k, v in headers.items()}
         exchanges.append({
             "ts": record.get("ts"),
             "method": req.get("method"),
@@ -206,7 +230,7 @@ def load_http_exchanges(result_path, case_id, evidence_refs=None):
 
 
 def render_http_exchanges(exchanges):
-    """渲染原始请求/响应摘要块；error 形态渲染失败说明。"""
+    """渲染脱敏请求/响应摘要块；error 形态渲染失败说明。"""
     if not exchanges:
         return ""
     blocks = []
@@ -243,9 +267,9 @@ def render_http_exchanges(exchanges):
         lines.append('</div>')
         blocks.append("".join(lines))
     return (
-        '<h4>原始请求/响应</h4>'
+        '<h4>原始请求/响应（脱敏摘要）</h4>'
         f'<div class="http-exchanges">{"".join(blocks)}</div>'
-        '<p class="quiet">报文按原样展示，超长内容已截断；完整原文以证据文件为准（sha256 可验）。</p>'
+        '<p class="quiet">敏感字段已遮蔽，超长内容已截断；完整原文以证据文件为准（sha256 可验）。</p>'
     )
 
 
@@ -626,17 +650,6 @@ def main():
     gate_passed = sum(1 for gate in gates if gate.get("status") == "passed")
     gate_problem = len(gates) - gate_passed
     contract_fingerprint = contract.get("contract_fingerprint") or "-"
-    contract_bindings = data.get("contracts") or []
-    contract_roles_text = " · ".join(
-        f'{item.get("role") or "trigger"}→{item.get("profile_id") or "-"}@{item.get("profile_revision") or "-"}'
-        for item in contract_bindings
-        if isinstance(item, dict)
-    ) or "-"
-    contract_roles_html = (
-        f'<div class="info-item"><span>契约绑定</span><strong>{esc(contract_roles_text)}</strong></div>'
-        if len(contract_bindings) > 1
-        else ""
-    )
     plan_fingerprint = plan.get("plan_fingerprint") or "-"
     if len(plan_fingerprint) > 30:
         plan_fingerprint = plan_fingerprint[:22] + "…" + plan_fingerprint[-8:]
@@ -707,7 +720,6 @@ def main():
     <div class="info-item"><span>计划指纹</span><code title="{esc(plan.get("plan_fingerprint") or "-")}">{esc(plan_fingerprint)}</code></div>
     <div class="info-item"><span>审核人 / 审核时间</span><strong>{esc(review.get("reviewer") or "-")} · {format_time(review.get("approved_at"))}</strong></div>
     <div class="info-item"><span>契约指纹</span><code title="{esc(contract.get("contract_fingerprint") or "-")}">{esc(contract_fingerprint)}</code></div>
-    {contract_roles_html}
     <div class="info-item"><span>开始时间</span><strong>{format_time(data.get("started_at"))}</strong></div>
     <div class="info-item"><span>结束时间</span><strong>{format_time(data.get("finished_at"))}</strong></div>
     <div class="info-item"><span>报告生成</span><strong>{format_time(generated_at)}</strong></div>

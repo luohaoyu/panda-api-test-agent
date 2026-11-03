@@ -44,31 +44,6 @@
     "document_fingerprint": "sha256:<64 hex>",
     "contract_fingerprint": "sha256:<64 hex>"
   },
-  "contracts": [
-    {
-      "profile_path": "docs/interface-profile/module.md",
-      "governance_schema_version": "1.0",
-      "profile_id": "project:module",
-      "profile_revision": 3,
-      "code_baseline": "<commit-or-release>",
-      "lifecycle": "executable",
-      "document_fingerprint": "sha256:<64 hex>",
-      "contract_fingerprint": "sha256:<64 hex>",
-      "role": "trigger"
-    },
-    {
-      "profile_path": "docs/interface-profile/log.md",
-      "governance_schema_version": "1.0",
-      "profile_id": "project:log",
-      "profile_revision": 5,
-      "code_baseline": "<commit-or-release>",
-      "lifecycle": "executable",
-      "document_fingerprint": "sha256:<64 hex>",
-      "contract_fingerprint": "sha256:<64 hex>",
-      "role": "oracle",
-      "interface_ref": "scanOperationLog.pageList"
-    }
-  ],
   "environment": {
     "environment_id": "local-test",
     "base_url": "http://127.0.0.1:8080",
@@ -256,8 +231,6 @@ HTTP 步骤必须引用当前用例证据；断言步骤必须引用结果中的
 ```
 
 `executed = passed + failed + errors`。`skipped` 和 `not_run` 不计入实际执行。
-
-Oracle 任务（统一 Run 中的 `oracle_verification`）遵循同一状态词表：`not_enabled` 表示 DB/驱动/绑定不可用（覆盖缺口，不算执行通过），数据不符记 `failed`。只要存在 `oracle_required` 且未全部 `passed`，运行 verdict 不得为 `passed`。
 
 只有 `failed=0`、`errors=0`、`not_run=0`、清理不是 `failed/not_run/waived`、不存在 `pending_objects`，且所有必需覆盖均实际执行时，才允许 verdict 为 `passed`。只要 `waived_cases` 或未处置残留对象非空，verdict 必须为 `inconclusive`，除非存在更严重的 gates/case failed/error 状态。
 

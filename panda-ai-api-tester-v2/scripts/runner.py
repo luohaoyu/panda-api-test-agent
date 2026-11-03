@@ -21,6 +21,12 @@ from runtime_context import RuntimeContext, RuntimeContextError, auth_config, au
 
 
 SUPPORTED_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+SENSITIVE_KEYS = {
+    "authorization", "cookie", "setcookie", "token", "accesstoken", "refreshtoken",
+    "password", "secret", "clientsecret", "apikey", "xapikey", "phone", "principal",
+    "email", "name", "address", "street", "area", "remarks", "pickupcode",
+    "verificationpin", "waybillno", "corderno", "requestid", "foursegmentcode",
+}
 PRODUCTION_HOST_HINTS = {"prod", "production", "live"}
 WRITE_METHODS = {"POST", "PUT", "PATCH"}
 DESTRUCTIVE_METHODS = {"DELETE"}
@@ -135,63 +141,6 @@ def _normalized_profile_document(raw):
     )
 
 
-PROFILE_FACT_STATUSES = {"candidate", "confirmed", "rejected", "needs_reviewer", "superseded"}
-
-
-def _governance_fact_refs(body):
-    """Read the optional ``facts:`` refs written by L1 into the governance block.
-
-    Execution only needs to know whether the declared basis is settled, so this
-    stays a strict reader of the documented shape rather than a YAML dependency.
-    """
-    lines = body.splitlines()
-    start = None
-    for index, line in enumerate(lines):
-        if re.match(r"^facts:\s*(?:#.*)?$", line):
-            start = index
-            break
-    if start is None:
-        return []
-    refs = []
-    current = None
-    for line in lines[start + 1 :]:
-        if not line.strip():
-            continue
-        if not line.startswith((" ", "\t")):
-            break
-        item = re.match(r"^\s*-\s+([A-Za-z_]+):\s*(.*)$", line)
-        if item:
-            current = {item.group(1): item.group(2).strip()}
-            refs.append(current)
-            continue
-        field = re.match(r"^\s+([A-Za-z_]+):\s*(.*)$", line)
-        if field and current is not None:
-            current[field.group(1)] = field.group(2).strip()
-    return refs
-
-
-def _assert_profile_facts_settled(fact_refs, lifecycle):
-    if not fact_refs:
-        return
-    seen = set()
-    for ref in fact_refs:
-        fact_id = (ref.get("fact_id") or "").strip()
-        if not fact_id:
-            raise RunnerError("interface profile governance facts entry requires fact_id")
-        if fact_id in seen:
-            raise RunnerError(f"interface profile governance duplicate fact_id: {fact_id}")
-        seen.add(fact_id)
-        status = (ref.get("status") or "").strip()
-        if status not in PROFILE_FACT_STATUSES:
-            raise RunnerError(f"interface profile fact {fact_id} has unsupported status: {status or 'missing'}")
-        if status == "confirmed" and not (ref.get("confirmed_by") or "").strip():
-            raise RunnerError(f"interface profile fact {fact_id} confirmed status requires confirmed_by")
-        if lifecycle == "executable" and status != "confirmed":
-            raise RunnerError(
-                f"PROFILE_FACTS_UNCONFIRMED: fact {fact_id} is {status}, executable profile requires confirmed facts"
-            )
-
-
 def load_interface_profile_identity(path, *, allow_drafted=False):
     profile_path = Path(path).resolve()
     if not profile_path.is_file():
@@ -225,8 +174,6 @@ def load_interface_profile_identity(path, *, allow_drafted=False):
     ).hexdigest()
     if actual_document_fingerprint.lower() != document_fingerprint.lower():
         raise RunnerError("interface profile document_fingerprint mismatch")
-    fact_refs = _governance_fact_refs(body)
-    _assert_profile_facts_settled(fact_refs, lifecycle)
     if not allow_drafted:
         owners_block = re.search(r"(?ms)^owners:\s*\n(?P<body>(?:^[ \t]+[^\n]+\n?)+)", body)
         if not owners_block:
@@ -245,100 +192,7 @@ def load_interface_profile_identity(path, *, allow_drafted=False):
         "lifecycle": lifecycle,
         "document_fingerprint": document_fingerprint,
         "contract_fingerprint": contract_fingerprint,
-        "fact_refs": fact_refs,
     }
-
-
-CONTRACT_ROLES = ("trigger", "oracle", "negative_oracle")
-CONTRACT_IDENTITY_FIELDS = (
-    "profile_path", "governance_schema_version", "profile_id", "profile_revision",
-    "code_baseline", "lifecycle", "document_fingerprint", "contract_fingerprint",
-)
-EXECUTION_LIFECYCLES = {"minimally_usable", "confirmed", "executable"}
-
-
-def normalize_contract_bindings(package):
-    """Return role-tagged contract bindings, normalising the legacy single contract.
-
-    A requirement-level package asserts on more interfaces than the one it
-    triggers: log, trace and negative-visibility interfaces act as Oracles and
-    need the same revision/lifecycle/fingerprint governance as the trigger. The
-    single ``contract`` object could not express that, so ``contracts`` is a
-    list. A package that still declares ``contract`` is read as one ``trigger``
-    binding and keeps its previous behaviour.
-    """
-    raw = package.get("contracts")
-    if raw is None:
-        contract = package.get("contract")
-        if isinstance(contract, dict) and contract:
-            binding = deepcopy(contract)
-            binding.setdefault("role", "trigger")
-            return [binding]
-        return []
-    if not isinstance(raw, list) or not raw:
-        raise RunnerError("contracts must be a non-empty list of contract bindings")
-    bindings = []
-    for index, item in enumerate(raw):
-        if not isinstance(item, dict) or not item:
-            raise RunnerError(f"contracts[{index}] must be a non-empty object")
-        binding = deepcopy(item)
-        binding["role"] = str(binding.get("role") or "trigger").strip().lower()
-        bindings.append(binding)
-    return bindings
-
-
-def validate_contract_bindings(package, *, allow_drafted=False):
-    """Fail-closed preflight for every interface profile a package asserts on.
-
-    Each binding is checked against its own profile document, so an Oracle whose
-    profile drifted, was downgraded below the execution lifecycle, or carries
-    unconfirmed facts blocks the run instead of silently feeding assertions.
-    """
-    bindings = normalize_contract_bindings(package)
-    if not bindings:
-        raise RunnerError("package requires contract or contracts interface profile bindings")
-    seen = set()
-    triggers = 0
-    for index, binding in enumerate(bindings):
-        role = binding.get("role")
-        if role not in CONTRACT_ROLES:
-            raise RunnerError(f"contracts[{index}].role must be one of {', '.join(CONTRACT_ROLES)}")
-        if role == "trigger":
-            triggers += 1
-        elif not str(binding.get("interface_ref") or "").strip():
-            raise RunnerError(f"contracts[{index}] role {role} requires interface_ref")
-        missing = [field for field in CONTRACT_IDENTITY_FIELDS if binding.get(field) in (None, "")]
-        if missing:
-            raise RunnerError(
-                f"contracts[{index}] ({role}) missing interface profile identity fields: " + ", ".join(missing)
-            )
-        if not allow_drafted and binding.get("lifecycle") not in EXECUTION_LIFECYCLES:
-            raise RunnerError(
-                f"contracts[{index}] ({role}) lifecycle must be minimally_usable, confirmed, or executable for EXECUTE"
-            )
-        identity = load_interface_profile_identity(binding.get("profile_path"), allow_drafted=allow_drafted)
-        for field in CONTRACT_IDENTITY_FIELDS[1:]:
-            if str(identity.get(field)).lower() != str(binding.get(field)).lower():
-                raise RunnerError(f"interface profile {field} mismatch for contracts[{index}] ({role})")
-        if not allow_drafted and identity.get("lifecycle") not in EXECUTION_LIFECYCLES:
-            raise RunnerError(f"interface profile lifecycle does not allow EXECUTE for contracts[{index}] ({role})")
-        key = (identity.get("profile_id"), role)
-        if key in seen:
-            raise RunnerError(
-                f"duplicate contract binding for profile {identity.get('profile_id')} with role {role}"
-            )
-        seen.add(key)
-    if triggers != 1:
-        raise RunnerError("contracts requires exactly one trigger binding")
-    return bindings
-
-
-def primary_contract_binding(bindings):
-    """Return the trigger binding in the legacy single-contract shape."""
-    for binding in bindings:
-        if binding.get("role") == "trigger":
-            return {key: value for key, value in binding.items() if key != "role"}
-    return {}
 
 
 def slug(value):
@@ -356,8 +210,64 @@ def canonical_key(value):
     return re.sub(r"[^a-z0-9]", "", str(value).lower())
 
 
+def is_sensitive_key(value):
+    key = canonical_key(value)
+    if key in SENSITIVE_KEYS:
+        return True
+    return any(
+        key.endswith(token) or key.startswith(token)
+        for token in ("authorization", "cookie", "token", "password", "secret", "apikey", "phone", "email", "address", "street", "area", "remarks", "name", "code", "pin", "requestid", "waybill")
+    )
 
 
+def redact_url(value):
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        return value
+    if not parsed.scheme or not parsed.netloc:
+        return value
+    query = []
+    for key, item in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
+        query.append((key, "***REDACTED***" if canonical_key(key) in SENSITIVE_KEYS else item))
+    netloc = parsed.hostname or ""
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, parsed.path, urllib.parse.urlencode(query), ""))
+
+
+def redact_embedded_urls(value):
+    return re.sub(r"https?://[^\s\"'<>]+", lambda match: redact_url(match.group(0)), value)
+
+
+def redact(value, key=None, secrets=None):
+    secrets = [item for item in (secrets or []) if item]
+    if key and is_sensitive_key(key):
+        return "***REDACTED***"
+    if isinstance(value, dict):
+        return {item_key: redact(item_value, item_key, secrets) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [redact(item, secrets=secrets) for item in value]
+    if isinstance(value, str):
+        result = redact_url(value) if value.startswith(("http://", "https://")) else redact_embedded_urls(value)
+        result = re.sub(
+            r"(?i)\b(basic|bearer)\s+[^\s,;]+",
+            lambda match: match.group(1).title() + " ***REDACTED***",
+            result,
+        )
+        for secret in secrets:
+            # Avoid corrupting semantic enum/status values when a test fixture
+            # uses a very short secret such as "pass". Sensitive fields are
+            # already redacted by key; substring replacement is reserved for
+            # secrets long enough to be unambiguously sensitive.
+            if len(secret) >= 8:
+                result = result.replace(secret, "***REDACTED***")
+            elif result == secret:
+                result = "***REDACTED***"
+        if len(result) > 4000:
+            return result[:4000] + "...[TRUNCATED]"
+        return result
+    return value
 
 
 def json_path_get(document, path):
@@ -380,13 +290,55 @@ def json_path_get(document, path):
     return current
 
 
+def redact_json_paths(document, paths):
+    result = deepcopy(document)
+    for path in paths or []:
+        if not isinstance(path, str) or not path.startswith("$."):
+            continue
+        tokens = [(name, int(index) if index else None) for name, index in re.findall(r"([^.[\]]+)|\[(\d+)\]", path[2:])]
+        current = result
+        for position, (name, index) in enumerate(tokens):
+            last = position == len(tokens) - 1
+            if name:
+                if not isinstance(current, dict) or name not in current:
+                    break
+                if last:
+                    current[name] = "***REDACTED***"
+                else:
+                    current = current[name]
+            else:
+                if not isinstance(current, list) or index >= len(current):
+                    break
+                if last:
+                    current[index] = "***REDACTED***"
+                else:
+                    current = current[index]
+    return result
 
-def sanitize_exchange(exchange, sensitive_json_paths=None):
+
+def sanitize_exchange(exchange, sensitive_json_paths):
     safe = deepcopy(exchange)
     if safe.get("response_json") is not None:
+        safe["response_json"] = redact_json_paths(safe["response_json"], sensitive_json_paths)
         safe["response_body"] = deepcopy(safe["response_json"])
     return safe
 
+
+def sanitize_assertions(assertions, sensitive_json_paths=None):
+    sanitized = []
+    for assertion in assertions:
+        item = deepcopy(assertion)
+        path = str(item.get("path", ""))
+        terminal = re.split(r"[.\[\]'\"]+", path)[-1] if path else ""
+        if canonical_key(terminal) in SENSITIVE_KEYS or path in set(sensitive_json_paths or []):
+            passed = item.get("status") == "passed"
+            item["original_operator"] = item.get("operator")
+            item["operator"] = "equals"
+            item["expected"] = True
+            item["actual"] = passed
+            item["redacted"] = True
+        sanitized.append(item)
+    return sanitized
 
 
 def assertion_passes(operator, expected, actual):
@@ -754,15 +706,16 @@ class AssertionEngine:
 
 
 class EvidenceWriter:
-    def __init__(self, run_dir):
+    def __init__(self, run_dir, secrets=None):
         self.run_dir = Path(run_dir).resolve()
         self.evidence_dir = self.run_dir / "evidence"
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        self.secrets = secrets if secrets is not None else []
 
     def write(self, identifier, payload):
         name = slug(identifier) + ".json"
         path = self.evidence_dir / name
-        data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
+        data = json.dumps(redact(payload, secrets=self.secrets), ensure_ascii=False, indent=2).encode("utf-8") + b"\n"
         path.write_bytes(data)
         return f"evidence/{name}", sha256_bytes(data)
 
@@ -817,6 +770,8 @@ class FixtureManager:
             try:
                 value = json_path_get(response_json, path)
                 self.resolver.set(variable, value)
+                if variable.startswith("secret_") and isinstance(value, str) and len(value) >= 4:
+                    self.evidence.secrets.append(value)
             except (KeyError, ValueError, TypeError) as exc:
                 raise RunnerError(f"fixture extraction failed for {variable} from {path}") from exc
 
@@ -845,6 +800,8 @@ class TeardownManager:
             for variable, path in action.get("cleanup_extract", {}).items():
                 value = json_path_get(response_json, path)
                 self.resolver.set(variable, value)
+                if variable.startswith("secret_") and isinstance(value, str) and len(value) >= 4:
+                    self.evidence.secrets.append(value)
             action["bound"] = True
         except (KeyError, ValueError, TypeError) as exc:
             action["cleanup_error"] = f"cleanup extraction failed for {variable} from {path}: {exc}"
@@ -890,11 +847,11 @@ class TeardownManager:
                 ref, digest = self.evidence.write(f"teardown-{case_id}", {"case_id": case_id, "exchange": exchange, "verification_exchange": verify_exchange, "verification_assertions": verify_assertions, "status": status})
                 record = {"case_id": case_id, "status": status, "verified": verified, "evidence_ref": ref, "evidence_sha256": digest}
                 if status != "passed":
-                    pending.append({"case_id": case_id, "object_ref": object_ref or item.get("object_ref"), "reason": f"HTTP {exchange['status']}"})
+                    pending.append({"case_id": case_id, "object_ref": redact(object_ref or item.get("object_ref"), secrets=self.evidence.secrets), "reason": f"HTTP {exchange['status']}"})
             except Exception as exc:
-                actual = str(exc)
+                actual = redact(str(exc), secrets=self.evidence.secrets)
                 record = {"case_id": case_id, "status": "failed", "actual": actual}
-                pending.append({"case_id": case_id, "object_ref": object_ref or item.get("object_ref"), "reason": actual})
+                pending.append({"case_id": case_id, "object_ref": redact(object_ref or item.get("object_ref"), secrets=self.evidence.secrets), "reason": actual})
             action_results.append(record)
         return {"status": "failed" if pending else "passed", "pending_objects": pending, "actions": action_results}
 
@@ -1008,13 +965,15 @@ class GateExecutor:
             assertions = AssertionEngine().evaluate(self.resolver.resolve(gate.get("assertions") or {"http_status": [200], "business_code": {"path": "$.code", "equals": 200}, "required_fields": ["$.code"]}), exchange)
             required_assertions = [item for item in assertions if item.get("required", True)]
             passed = bool(required_assertions) and all(item["status"] == "passed" for item in required_assertions)
-            payload = {"gate_id": gate_id, "exchange": sanitize_exchange(exchange), "assertions": assertions}
+            sensitive_paths = gate.get("sensitive_json_paths") or []
+            assertions = sanitize_assertions(assertions, sensitive_paths)
+            payload = {"gate_id": gate_id, "exchange": sanitize_exchange(exchange, sensitive_paths), "assertions": assertions}
             ref, digest = self.evidence.write(f"gate-{gate_id}", payload)
             result = self._gate_result(gate_id, gate.get("name", gate_id), "passed" if passed else "failed", gate.get("classification", "environment"), f"HTTP {exchange['status']}", [ref], digest, blocking=gate.get("blocking", True))
             result["runtime"] = True
             return result
         except Exception as exc:
-            payload = {"gate_id": gate_id, "error": str(exc), "assertions": []}
+            payload = {"gate_id": gate_id, "error": redact(str(exc), secrets=self.evidence.secrets), "assertions": []}
             ref, digest = self.evidence.write(f"gate-{gate_id}", payload)
             result = self._gate_result(gate_id, gate.get("name", gate_id), "error", "environment", payload["error"], [ref], digest, blocking=gate.get("blocking", True))
             result["runtime"] = True
@@ -1029,14 +988,15 @@ class GateExecutor:
 
 
 class ResultWriter:
-    def __init__(self, run_dir):
+    def __init__(self, run_dir, secrets=None):
         self.run_dir = Path(run_dir).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.secrets = secrets if secrets is not None else []
 
     def write(self, result):
         path = self.run_dir / "result.json"
         temporary = self.run_dir / ".result.json.tmp"
-        safe_result = result
+        safe_result = redact(result, secrets=self.secrets)
         temporary.write_text(json.dumps(safe_result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.replace(path)
         return path
@@ -1062,16 +1022,16 @@ class ApiTestRunner:
         initial = {"run_id": f"run-{datetime.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"}
         self.resolver = VariableResolver(initial, self.allowed_bindings, runtime_context)
         self.auth = AuthInjector(package, self.resolver)
+        secrets = runtime_context.redaction_values()
         self.http = HttpExecutor(self.base_url, self.environment.get("timeout_seconds", 10), self.environment.get("max_response_bytes", 1024 * 1024), self.auth)
-        self.evidence = EvidenceWriter(self.run_dir)
+        self.evidence = EvidenceWriter(self.run_dir, secrets)
         self.teardown = TeardownManager(self.resolver, self.http, self.evidence)
         self.fixtures = FixtureManager(self.resolver, self.http, self.evidence, self.teardown)
         self.assertions = AssertionEngine()
-        self.result_writer = ResultWriter(self.run_dir)
+        self.result_writer = ResultWriter(self.run_dir, secrets)
         self.write_attempt_risks = []
         self.residual_risks = []
         self.plan_fingerprint = None
-        self.contract_bindings = []
         self.review = self.package.get("review") or {}
         self.approved_case_ids = set()
         self.blocked_case_ids = set()
@@ -1133,7 +1093,7 @@ class ApiTestRunner:
                 if fixture_records:
                     gate_results.append({"gate_id": "GATE-FIXTURES", "name": "测试夹具", "status": "passed", "classification": "test_case", "actual": f"prepared {len(fixture_records)} fixture(s)", "evidence_refs": [item["evidence_ref"] for item in fixture_records if item.get("evidence_ref")]})
             except Exception as exc:
-                gate = {"gate_id": "GATE-FIXTURES", "name": "测试夹具", "status": "error", "classification": "test_case", "actual": str(exc), "evidence_refs": []}
+                gate = {"gate_id": "GATE-FIXTURES", "name": "测试夹具", "status": "error", "classification": "test_case", "actual": redact(str(exc), secrets=self.evidence.secrets), "evidence_refs": []}
                 gate_results.append(gate)
                 case_results = [
                     self._not_run_case(
@@ -1194,14 +1154,13 @@ class ApiTestRunner:
             "mode": self.package.get("mode"),
             "execution_profile": self.package.get("execution_profile"),
             "plan": {"plan_fingerprint": self.plan_fingerprint, "title": (self.package.get("plan") or {}).get("title") or self.package.get("title")},
-            "feasibility": self.package.get("feasibility") or {},
-            "package_build": self.package.get("package_build") or {},
+            "feasibility": redact(self.package.get("feasibility") or {}, secrets=self.evidence.secrets),
+            "package_build": redact(self.package.get("package_build") or {}, secrets=self.evidence.secrets),
             "review": {key: value for key, value in self.review.items() if key not in {"comment", "findings"}},
-            "contract": primary_contract_binding(self.contract_bindings) or (self.package.get("contract") or {}),
-            "contracts": self.contract_bindings,
+            "contract": self.package.get("contract") or {},
             "test_config": self.package.get("test_config") or {},
-            "project": self.package.get("project") or {},
-            "environment": {"environment_id": self.environment.get("environment_id", "unknown"), "base_url": self.base_url, "production": bool(self.environment.get("production", False)), "runtime_status": self._environment_runtime_status(gate_results, case_results), "runtime_context": self.runtime_context.metadata()},
+            "project": redact(self.package.get("project") or {}, secrets=self.evidence.secrets),
+            "environment": {"environment_id": self.environment.get("environment_id", "unknown"), "base_url": redact_url(self.base_url), "production": bool(self.environment.get("production", False)), "runtime_status": self._environment_runtime_status(gate_results, case_results), "runtime_context": self.runtime_context.metadata()},
             "started_at": started_at,
             "finished_at": now_iso(),
             "gate_results": gate_results,
@@ -1264,14 +1223,12 @@ class ApiTestRunner:
                 ApiTestRunner._reject_inline_sensitive_headers(item, f"{location}[{index}]")
 
     def _validate_package(self):
-        required = ["schema_version", "package_id", "project", "test_config", "mode", "environment", "risk", "cases"]
+        required = ["schema_version", "package_id", "project", "test_config", "mode", "contract", "environment", "risk", "cases"]
         missing = [field for field in required if field not in self.package]
         if missing:
             raise RunnerError("package missing required fields: " + ", ".join(missing))
-        if not (isinstance(self.package.get("contract"), dict) or isinstance(self.package.get("contracts"), list)):
-            raise RunnerError("package missing required fields: contract or contracts")
-        if self.package.get("schema_version") not in {"2.1", "2.2", "2.3"}:
-            raise RunnerError("package schema_version must be 2.1 (legacy), 2.2, or 2.3")
+        if self.package.get("schema_version") not in {"2.1", "2.2"}:
+            raise RunnerError("package schema_version must be 2.1 (legacy) or 2.2")
         feasibility_errors = validate_package_feasibility(self.package)
         if feasibility_errors:
             raise RunnerError("; ".join(feasibility_errors))
@@ -1297,10 +1254,24 @@ class ApiTestRunner:
         project_id = (self.package.get("project") or {}).get("workspace_id")
         if project_id and config_identity.get("project_id") != project_id:
             raise RunnerError("test config project_id does not match package project.workspace_id")
+        contract = self.package.get("contract") or {}
         fast_single_api = self.package.get("execution_profile") == "single_api_quality"
-        # Every interface the package asserts on is validated, not only the one it
-        # triggers: Oracle profiles carry the same governance obligations.
-        self.contract_bindings = validate_contract_bindings(self.package, allow_drafted=fast_single_api)
+        required_contract = (
+            "profile_path", "governance_schema_version", "profile_id", "profile_revision",
+            "code_baseline", "lifecycle", "document_fingerprint", "contract_fingerprint",
+        )
+        missing_contract = [field for field in required_contract if contract.get(field) in (None, "")]
+        if missing_contract:
+            raise RunnerError("contract missing required interface profile identity fields: " + ", ".join(missing_contract))
+        allowed_execution_lifecycles = {"minimally_usable", "confirmed", "executable"}
+        if not fast_single_api and contract.get("lifecycle") not in allowed_execution_lifecycles:
+            raise RunnerError("contract lifecycle must be minimally_usable, confirmed, or executable for EXECUTE")
+        profile_identity = load_interface_profile_identity(contract.get("profile_path"), allow_drafted=fast_single_api)
+        for field in required_contract[1:]:
+            if str(profile_identity.get(field)).lower() != str(contract.get(field)).lower():
+                raise RunnerError(f"interface profile {field} mismatch")
+        if not fast_single_api and profile_identity.get("lifecycle") not in allowed_execution_lifecycles:
+            raise RunnerError("interface profile lifecycle does not allow EXECUTE")
         if not isinstance(self.package.get("cases"), list) or not self.package["cases"]:
             raise RunnerError("package requires at least one case")
         case_ids = [case.get("case_id") for case in self.package["cases"]]
@@ -1592,7 +1563,7 @@ class ApiTestRunner:
             self.http.with_auth_mode(None)
             auth_observation = "failed" if exchange.get("status") in {401, 403} else "verified"
             if case.get("side_effect") == "write" and waiver is None and not case.get("teardown"):
-                self.residual_risks.append({"case_id": case_id, "object_ref": case.get("object_ref"), "reason": "普通非生产写入未配置 teardown；残留对象需人工处置。", "risk": "accepted_pending_cleanup"})
+                self.residual_risks.append({"case_id": case_id, "object_ref": redact(case.get("object_ref"), secrets=self.evidence.secrets), "reason": "普通非生产写入未配置 teardown；残留对象需人工处置。", "risk": "accepted_pending_cleanup"})
                 step("register_residual_risk", "passed", object_ref=case.get("object_ref"), reason="no teardown configured")
             if action is not None:
                 self.teardown.bind_response(action, exchange.get("response_json"))
@@ -1610,18 +1581,20 @@ class ApiTestRunner:
                     self.resolver.resolve(verification.get("assertions")), verification_exchange
                 )
                 assertions.extend(verification_assertions)
-                step("read_only_verification", "passed" if all(item.get("status") == "passed" for item in verification_assertions if item.get("required", True)) else "failed", method=verification_exchange.get("method"), url=verification_exchange.get("url", ""), http_status=verification_exchange.get("status"))
+                step("read_only_verification", "passed" if all(item.get("status") == "passed" for item in verification_assertions if item.get("required", True)) else "failed", method=verification_exchange.get("method"), url=redact_url(verification_exchange.get("url", "")), http_status=verification_exchange.get("status"))
                 if not primary_passed:
                     self.write_attempt_risks.append({"case_id": case_id, "reason": "rejection assertion failed; read-only verification executed"})
             required = [item for item in assertions if item.get("required", True)]
             passed = bool(required) and all(item["status"] == "passed" for item in required)
+            sensitive_paths = case.get("sensitive_json_paths") or []
             if passed:
                 self._extract(case.get("extract") or {}, exchange.get("response_json"), case_id)
                 if case.get("extract"):
                     step("extract_variables", "passed", variables=sorted(case.get("extract")))
-            evidence_payload = {"case_id": case_id, "name": name, "exchange": sanitize_exchange(exchange), "verification_exchange": sanitize_exchange(verification_exchange) if verification_exchange else None, "assertions": assertions}
+            assertions = sanitize_assertions(assertions, sensitive_paths)
+            evidence_payload = {"case_id": case_id, "name": name, "exchange": sanitize_exchange(exchange, sensitive_paths), "verification_exchange": sanitize_exchange(verification_exchange, []) if verification_exchange else None, "assertions": assertions}
             evidence_ref, digest = self.evidence.write(f"case-{case_id}", evidence_payload)
-            step("http_exchange", "passed", method=exchange.get("method"), url=exchange.get("url", ""), http_status=exchange.get("status"), elapsed_ms=exchange.get("elapsed_ms"), evidence_refs=[evidence_ref], evidence_sha256=digest)
+            step("http_exchange", "passed", method=exchange.get("method"), url=redact_url(exchange.get("url", "")), http_status=exchange.get("status"), elapsed_ms=exchange.get("elapsed_ms"), evidence_refs=[evidence_ref], evidence_sha256=digest)
             if waiver is not None:
                 step("cleanup_waiver", "passed", waiver_id=waiver.get("waiver_id"), object_ref=case.get("object_ref"), data_tag=waiver.get("data_tag"), reason=waiver.get("reason"), residual_risk=waiver.get("residual_risk"))
             for assertion in assertions:
@@ -1664,8 +1637,8 @@ class ApiTestRunner:
             if case.get("side_effect") == "write_attempt" and request_delivery in {"confirmed", "unknown"}:
                 self.write_attempt_risks.append({"case_id": case_id, "reason": f"write_attempt execution error with request_delivery={request_delivery}; side effect requires review"})
             cleanup_registered = any(item.get("case_id") == case_id for item in self.teardown.actions)
-            step("case_error", "error", actual=str(exc), request_delivery=request_delivery)
-            return {"case_id": case_id, "name": name, "status": "error", "classification": "environment" if isinstance(exc, RunnerError) else "test_case", "request_sent": request_sent, "request_delivery": request_delivery, "auth_observation": "failed" if request_delivery == "confirmed" and getattr(exc, "status", None) in {401, 403} else ("verified" if request_delivery == "confirmed" else None), "scope": "approved", "cleanup_registered": cleanup_registered, "expected": "request executes and deterministic assertions complete", "actual": str(exc), "assertions": [], "evidence_refs": [], "blocked_by": [], "requirement_refs": list(case.get("requirement_refs") or []), "business_rule_refs": list(case.get("business_rule_refs") or []), "scenario_refs": list(case.get("scenario_refs") or []), "scenario_type": case.get("scenario_type", "positive"), "execution_trace": {"status": "error", "steps": steps}}
+            step("case_error", "error", actual=redact(str(exc), secrets=self.evidence.secrets), request_delivery=request_delivery)
+            return {"case_id": case_id, "name": name, "status": "error", "classification": "environment" if isinstance(exc, RunnerError) else "test_case", "request_sent": request_sent, "request_delivery": request_delivery, "auth_observation": "failed" if request_delivery == "confirmed" and getattr(exc, "status", None) in {401, 403} else ("verified" if request_delivery == "confirmed" else None), "scope": "approved", "cleanup_registered": cleanup_registered, "expected": "request executes and deterministic assertions complete", "actual": redact(str(exc), secrets=self.evidence.secrets), "assertions": [], "evidence_refs": [], "blocked_by": [], "requirement_refs": list(case.get("requirement_refs") or []), "business_rule_refs": list(case.get("business_rule_refs") or []), "scenario_refs": list(case.get("scenario_refs") or []), "scenario_type": case.get("scenario_type", "positive"), "execution_trace": {"status": "error", "steps": steps}}
 
     def _waived_cleanup_cases(self, case_results):
         waived = []
@@ -1692,6 +1665,8 @@ class ApiTestRunner:
             try:
                 value = json_path_get(response_json, path)
                 self.resolver.set(variable, value)
+                if variable.startswith("secret_") and isinstance(value, str) and len(value) >= 4:
+                    self.evidence.secrets.append(value)
             except (KeyError, ValueError, TypeError) as exc:
                 raise RunnerError(f"case {case_id} extraction failed for {variable} from {path}") from exc
 

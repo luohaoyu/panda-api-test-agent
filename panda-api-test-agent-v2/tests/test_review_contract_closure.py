@@ -17,7 +17,12 @@ L2_SCRIPTS = Path(__file__).resolve().parents[2] / "panda-ai-api-tester-v2" / "s
 sys.path.insert(0, str(L2_SCRIPTS))
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
-import render_requirement_report as report
+try:
+    import render_requirement_report as report
+    REPORT_THEME_ERROR = None
+except RuntimeError as exc:
+    report = None
+    REPORT_THEME_ERROR = str(exc)
 from plan_compiler import compile_plan
 from requirement_validation import build_requirement_validation_intent
 from review_adapter import canonical_review
@@ -27,6 +32,7 @@ from run_orchestrator import (
     build_requirement_manifest_for_runs,
     compile_and_create_run,
     next_action,
+    record_execution_authorization,
     record_review,
     reduce_run,
 )
@@ -62,6 +68,7 @@ def _documented_review(intent, status="approved", **overrides):
         "reviewer": "user",
         "reviewed_at": "2026-11-02T00:00:00+08:00",
         "approved_case_ids": case_ids,
+        "execution_case_ids": case_ids,
         "reviewed_fields": ["cases", "request_summaries", "assertions", "data_dependencies", "side_effects"],
         "comment": None,
         "expires_at": None,
@@ -70,14 +77,34 @@ def _documented_review(intent, status="approved", **overrides):
     return review, plan, case_ids
 
 
+def _write_evidence(root, name="t1.json"):
+    path = root / "evidence" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}", encoding="utf-8")
+    return f"evidence/{name}"
+
+
+def _authorize(root, case_ids, authorization_id="AUTH-CLOSE"):
+    return record_execution_authorization(root, {
+        "kind": "execution_approval",
+        "status": "approved",
+        "authorized_case_ids": list(case_ids),
+        "authorization_id": authorization_id,
+        "authorizer": "qa",
+        "authorized_at": "2026-11-02T00:05:00+08:00",
+    })
+
+
 class DocumentedReviewContractTests(unittest.TestCase):
     def test_documented_envelope_compiles_a_run(self):
         intent = _intent()
-        review, plan, _ = _documented_review(intent)
+        review, plan, case_ids = _documented_review(intent)
         intent["review"] = review
         root = Path(tempfile.mkdtemp()) / "RUN-DOC"
         created = compile_and_create_run(intent, root, run_id="RUN-DOC")
-        self.assertEqual(created["next_action"]["action"], "execute_slice")
+        self.assertEqual(created["next_action"]["action"], "request_execution_approval")
+        _authorize(root, case_ids, "AUTH-DOC")
+        self.assertEqual(next_action(root)["action"], "execute_slice")
         self.assertEqual(created["review"]["approved_at"], "2026-11-02T00:00:00+08:00")
         self.assertEqual(created["review"]["approval_field_source"], "reviewed_at")
         self.assertEqual(created["review"]["fingerprint_source"], "design_fingerprint")
@@ -152,10 +179,12 @@ class ApprovalWriteBackTests(unittest.TestCase):
 
     def test_approval_unlocks_the_same_run(self):
         intent, root = self._pending_run()
-        self.assertEqual(next_action(root)["action"], "request_approval")
-        review, _, _ = _documented_review(intent)
+        self.assertEqual(next_action(root)["action"], "request_plan_review")
+        review, _, case_ids = _documented_review(intent)
         decision = record_review(root, review)
-        self.assertEqual(decision["next_action"], "execute_slice")
+        self.assertEqual(decision["next_action"], "request_execution_approval")
+        self.assertEqual(next_action(root)["action"], "request_execution_approval")
+        _authorize(root, case_ids, "AUTH-WB")
         self.assertEqual(next_action(root)["action"], "execute_slice")
         executed = execute_slice(root, "S1", task_executor=lambda task, **_: {"status": "passed", "evidence_ref": "evidence/t1.json"})
         self.assertEqual(executed["status"], "passed")
@@ -176,9 +205,11 @@ class ApprovalWriteBackTests(unittest.TestCase):
 
     def test_reduced_run_cannot_be_reopened(self):
         intent, root = self._pending_run("RUN-WB-REDUCED")
-        review, _, _ = _documented_review(intent)
+        review, _, case_ids = _documented_review(intent)
         record_review(root, review)
-        execute_slice(root, "S1", task_executor=lambda task, **_: {"status": "passed", "evidence_ref": "evidence/t1.json"})
+        _authorize(root, case_ids, "AUTH-REDUCED")
+        evidence_ref = _write_evidence(root)
+        execute_slice(root, "S1", task_executor=lambda task, **_: {"status": "passed", "evidence_ref": evidence_ref})
         reduce_run(root)
         with self.assertRaisesRegex(OrchestrationError, "already reduced"):
             record_review(root, review)
@@ -190,12 +221,14 @@ class ApprovalWriteBackTests(unittest.TestCase):
         review, plan, case_ids = _documented_review(intent)
         root = Path(tempfile.mkdtemp()) / "RUN-WB-SHRINK"
         compile_and_create_run({**intent, "review": review}, root, run_id="RUN-WB-SHRINK")
+        _authorize(root, case_ids, "AUTH-SHRINK")
         execute_slice(root, "S1", task_executor=lambda task, **_: {"status": "passed", "evidence_ref": "evidence/t.json"})
         narrowed = dict(review, status="partially_approved", approved_case_ids=[case_ids[0]])
         with self.assertRaisesRegex(OrchestrationError, "already executed"):
             record_review(root, narrowed)
 
 
+@unittest.skipIf(report is None, f"optional panda-report-theme dependency unavailable: {REPORT_THEME_ERROR}")
 class ReportClosureTests(unittest.TestCase):
     def test_gate_blocked_item_reaches_blocked_verdict(self):
         root = Path(tempfile.mkdtemp()) / "RUN-BLOCKED"
@@ -228,9 +261,10 @@ class ReportClosureTests(unittest.TestCase):
     def test_release_recommendation_cannot_contradict_the_report(self):
         criteria = _criteria({"ac_id": "AC2", "text": "页面展示订单", "interface_verifiability": "none", "recommended_validation_layers": ["UI"]})
         intent = _intent(criteria)
-        review, _, _ = _documented_review(intent)
+        review, _, case_ids = _documented_review(intent)
         root = Path(tempfile.mkdtemp()) / "RUN-NONE-AC"
         compile_and_create_run({**intent, "review": review}, root, run_id="RUN-NONE-AC")
+        _authorize(root, case_ids, "AUTH-NONE-AC")
         execute_slice(root, "S1", task_executor=lambda task, **_: {"status": "passed", "evidence_ref": "evidence/t1.json"})
         reduce_run(root)
         manifest = build_requirement_manifest(root, title="none 验收项")
@@ -244,9 +278,10 @@ class ReportClosureTests(unittest.TestCase):
     def test_manifest_carries_a_stable_generated_at(self):
         criteria = _criteria()
         intent = _intent(criteria)
-        review, _, _ = _documented_review(intent)
+        review, _, case_ids = _documented_review(intent)
         root = Path(tempfile.mkdtemp()) / "RUN-TS"
         compile_and_create_run({**intent, "review": review}, root, run_id="RUN-TS")
+        _authorize(root, case_ids, "AUTH-TS")
         execute_slice(root, "S1", task_executor=lambda task, **_: {"status": "passed", "evidence_ref": "evidence/t1.json"})
         reduce_run(root)
         manifest = build_requirement_manifest(root, title="时间戳")
@@ -257,9 +292,10 @@ class ReportClosureTests(unittest.TestCase):
         roots = []
         for run_id, status in (("RUN-AGG-1", "failed"), ("RUN-AGG-2", "passed")):
             intent = _intent(requirement_id="REQ-AGG")
-            review, _, _ = _documented_review(intent)
+            review, _, case_ids = _documented_review(intent)
             root = Path(tempfile.mkdtemp()) / run_id
             compile_and_create_run({**intent, "review": review}, root, run_id=run_id)
+            _authorize(root, case_ids, f"AUTH-{run_id}")
             execute_slice(root, "S1", task_executor=lambda task, **_: {"status": status, "evidence_ref": f"evidence/{run_id}.json"})
             reduce_run(root)
             roots.append(root)

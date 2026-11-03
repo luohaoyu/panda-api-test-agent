@@ -12,13 +12,22 @@ class UnifiedEntryStateTests(unittest.TestCase):
         for entry_type in ("requirement_validation", "single_api_quality", "api_debug"):
             state = create_entry_state(run_id="RUN-1", entry_type=entry_type, case_ids=["C1"])
             self.assertEqual(state["phase"], "pending_review")
-            self.assertEqual(next_action_for_state(state), "request_approval")
+            self.assertEqual(next_action_for_state(state), "request_plan_review")
             self.assertFalse(state["approved_case_ids"])
 
-    def test_approved_scope_enters_execution(self):
-        state = create_entry_state(run_id="RUN-2", entry_type="single_api_quality", case_ids=["C1"], review={"status": "partially_approved", "approved_case_ids": ["C1"]})
-        self.assertEqual(state["phase"], "executing")
-        self.assertEqual(next_action_for_state(state), "execute_slice")
+    def test_approved_scope_waits_for_execution_authorization(self):
+        state = create_entry_state(
+            run_id="RUN-2",
+            entry_type="single_api_quality",
+            case_ids=["C1", "C2"],
+            review={
+                "status": "partially_approved",
+                "approved_case_ids": ["C1"],
+                "execution_case_ids": ["C1"],
+            },
+        )
+        self.assertEqual(state["phase"], "pending_review")
+        self.assertEqual(next_action_for_state(state), "request_execution_approval")
 
     def test_terminal_review_never_schedules_execution(self):
         for status in ("rejected", "plan_only", "expired", "superseded"):

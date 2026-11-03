@@ -80,10 +80,12 @@ def create_entry_state(*, run_id: str, entry_type: str, review: Any = None,
         raise EntryStateError(f"unsupported entry_type: {entry_type}")
     normalized_review = normalize_review(review, case_ids)
     review_status = normalized_review["status"]
+    requested = normalized_review.get("execution_case_ids") if "execution_case_ids" in normalized_review else normalized_review.get("requested_case_ids", [])
+    requested = list(requested or [])
     if review_status == "pending_review":
-        phase, status, next_action = "pending_review", "awaiting_approval", "request_approval"
+        phase, status, next_action = "pending_review", "awaiting_approval", "request_plan_review"
     elif review_status in EXECUTABLE_REVIEWS:
-        phase, status, next_action = "executing", "ready", "execute_slice"
+        phase, status, next_action = "pending_review", "blocked", "request_execution_approval" if requested else "resolve_dependencies"
     else:
         phase, status, next_action = "pending_review", "blocked", "review_not_executable"
     state = {
@@ -95,6 +97,11 @@ def create_entry_state(*, run_id: str, entry_type: str, review: Any = None,
         "review_status": review_status,
         "review_id": normalized_review.get("review_id"),
         "approved_case_ids": normalized_review.get("approved_case_ids", []),
+        "reviewed_case_ids": normalized_review.get("reviewed_case_ids", normalized_review.get("approved_case_ids", [])),
+        "requested_case_ids": requested,
+        "execution_case_ids": requested,
+        "authorized_case_ids": list((normalized_review.get("execution_authorization") or {}).get("authorized_case_ids") or []),
+        "execution_authorization": deepcopy(normalized_review.get("execution_authorization")) if isinstance(normalized_review.get("execution_authorization"), dict) else None,
         "design_fingerprint": normalized_review.get("design_fingerprint"),
         "plan_fingerprint": normalized_review.get("plan_fingerprint"),
         "config_ref": {},
@@ -137,6 +144,8 @@ def validate_state(state: dict[str, Any]) -> list[str]:
         errors.append("state.approved_case_ids must be a list")
     if state.get("phase") == "executing" and state.get("review_status") not in EXECUTABLE_REVIEWS:
         errors.append("only approved reviews may enter executing phase")
+    if state.get("phase") == "executing" and not state.get("authorized_case_ids"):
+        errors.append("execution authorization is required before executing phase")
     if state.get("review_status") in TERMINAL_NON_EXECUTABLE_REVIEWS and state.get("next_action") == "execute_slice":
         errors.append("non-executable review cannot schedule execute_slice")
     return errors
@@ -171,11 +180,15 @@ def next_action_for_state(state: dict[str, Any]) -> str:
     if state.get("phase") == "reported" or state.get("status") in {"reported", "reduced"}:
         return "complete"
     if state.get("review_status") == "pending_review":
-        return "request_approval"
+        return "request_plan_review"
     if state.get("review_status") in TERMINAL_NON_EXECUTABLE_REVIEWS:
         return "review_not_executable"
+    if not state.get("requested_case_ids"):
+        return "resolve_dependencies"
+    if not state.get("authorized_case_ids"):
+        return "request_execution_approval"
     if state.get("phase") == "reducing":
         return "reduce"
     if state.get("phase") == "executing":
         return "execute_slice"
-    return str(state.get("next_action") or "request_approval")
+    return str(state.get("next_action") or "request_plan_review")

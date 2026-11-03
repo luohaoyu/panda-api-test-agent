@@ -13,6 +13,7 @@ from typing import Any
 
 
 EXECUTABLE_REVIEWS = {"approved", "partially_approved"}
+DIAGNOSTIC_CODES = {"NO_EXECUTION_CASES_REQUESTED", "NO_READY_EXECUTION_CASES", "EXECUTION_APPROVAL_REQUIRED", "EXECUTION_SCOPE_EMPTY", "EXECUTION_SCOPE_NOT_READY", "EXECUTION_SCOPE_FINGERPRINT_MISMATCH"}
 REQUIRED_ASSETS = ("project", "test_config", "contract", "environment", "risk")
 CONFIG_GAP_KINDS = {"config", "profile", "secret", "runtime_binding"}
 CONFIG_SOURCE_ORDER = ("current_input", "canonical_config", "persistent_secret_store", "active_run")
@@ -293,6 +294,8 @@ def diagnose_design(
     status = review.get("status") or "pending_review"
     case_ids = _case_ids(design)
     scope = _scope(review, case_ids)
+    requested = review.get("execution_case_ids") if "execution_case_ids" in review else review.get("requested_case_ids", scope)
+    requested = requested if isinstance(requested, list) else []
 
     if status == "pending_review":
         issues.append(_issue(
@@ -317,6 +320,17 @@ def diagnose_design(
             next_action="create a new approved or partially_approved review if execution is still wanted",
         ))
     else:
+        if not requested:
+            issues.append(_issue(
+                "NO_EXECUTION_CASES_REQUESTED",
+                category="execution_precondition",
+                owner="user_or_reviewer",
+                severity="high",
+                recoverable=False,
+                evidence="execution_case_ids is explicitly empty",
+                impact="no business request may be sent",
+                next_action="resolve_dependencies or request a new explicit execution scope",
+            ))
         if not scope:
             issues.append(_issue(
                 "APPROVED_SCOPE_MISSING",

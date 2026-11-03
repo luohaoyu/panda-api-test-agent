@@ -92,13 +92,16 @@
 
 **强制状态**：设计生成后必须写为 `pending_review` 并停止执行。用户在提出任务时说“直接测”“开始执行”只表示允许生成设计，不等于审核了尚未看到的具体设计。
 
+**先展示设计深度摘要**：列出适用维度、覆盖义务总数、每个维度的义务数、obligation→case 映射、未覆盖/blocked/not_applicable/waived 项、参数组合策略和 Oracle 深度。审核人必须同时看见“已生成什么”和“按事实还缺什么”；不得用维度名称或任意一条用例代替完整性证明。
+
 **每条用例至少展示并纳入审核**：
 
 | 审核项 | 最少内容 |
 |---|---|
-| 用例 | `case_id`、标题（人类可读的一句话描述，不得用 `case_id` 自身充当标题）、入口类型、目标/AC 映射、是否拟执行 |
+| 用例 | `case_id`、标题（人类可读的一句话描述，不得用 `case_id` 自身充当标题）、覆盖义务、入口类型、目标/AC 映射、是否拟执行 |
+| 场景差异 | 前置业务状态、相对基线请求具体改变了哪个输入、命中哪个业务分支；不得只写“边界/异常”标签 |
 | 请求摘要 | 环境、方法、路径、关键参数类别、预计请求次数 |
-| 断言 | 状态码、响应契约、业务规则、外部 Oracle 摘要 |
+| 断言 | 状态码、业务 code、关键字段语义、业务规则、正/负副作用和外部 Oracle 摘要；仅字段存在不足以证明核心业务值正确 |
 | 数据依赖 | 前置数据、变量来源、账号/角色、前后顺序、清理要求 |
 | 副作用 | `read/write/destructive`、影响对象、真实外部动作、数据标签、清理方式和残留风险 |
 
@@ -141,7 +144,25 @@ C. rejected：退回修改
 D. plan_only：仅保存设计
 ```
 
-审核状态、审核范围、审核指纹和运行门禁必须由 `panda-ai-api-tester-v2` 或可信宿主确定性校验；主 Agent 不自行伪造批准。测试设计审核与生产/破坏性/批量/真实外部动作确认相互独立，必须同时满足。收到 `approved` 或 `partially_approved` 后，必须先调用 `record_review()` 写回原 Run，并确认 `review_recorded` 成功，再继续执行；不得只在对话中记住决定。相同 `run_id + plan_fingerprint + approved_case_ids` 已有有效审核时禁止重复展示本节完整模板。若当前 Slice 仅缺高风险授权，只展示环境、对象、范围、风险原因和有效期，并明确“原测试设计审批仍有效，本次不是重新审批测试方案”。
+方案审核状态、审核范围、审核指纹和运行门禁必须由 `panda-ai-api-tester-v2` 或可信宿主确定性校验；主 Agent 不自行伪造批准。收到 `approved` 或 `partially_approved` 后，必须先调用 `record_review()` 写回原 Run，并确认 `review_recorded` 成功；此时只进入 feasibility，不得直接执行。若 `executable_case_ids` 非空，再展示执行授权摘要（具体用例 ID+标题、环境、预计请求数、副作用和有效期），通过 `record_execution_authorization()` 写回独立 `execution_approval`；若为 0，则明确“实际请求 0 次”，不得申请授权。`plan_review`、`execution_approval` 与生产/破坏性/批量/真实外部动作的高风险确认相互独立，必须按适用情况全部满足。相同 `run_id + plan_fingerprint + approved_case_ids` 已有有效方案审核时禁止重复展示本节完整模板。若当前 Slice 仅缺高风险授权，只展示风险增量，并明确“原方案审核和执行授权仍有效，本次不是重新审批测试方案或执行范围”。
+
+**执行授权模板**：
+
+```text
+执行授权待确认（execution_approval）
+环境：<environment_id>
+执行范围指纹：<execution_scope_fingerprint>
+可执行用例：<case_id + 标题列表>
+预计请求：<n> 次
+副作用摘要：<read/write/destructive、对象和残留风险>
+
+请选择：
+A. approved：授权全部可执行用例
+B. partially_approved：仅授权这些 case_id：<...>
+C. rejected：本轮不执行
+```
+
+显式 `execution_case_ids=[]` 表示零执行，不得回退为全部审核用例；方案审核通过也不得借“继续”“按方案执行”自动补造授权 envelope。
 
 **示例对照**：
 

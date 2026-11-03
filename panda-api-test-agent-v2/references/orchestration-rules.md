@@ -47,7 +47,7 @@
 - **入口状态**（`scripts/entry_state.py`）：`entry_type`、`phase`、`review_status`、`approved_case_ids`、`design_fingerprint`、`plan_fingerprint`、`blocking_gap_ids`、`last_action`、`next_action`、`request_count_expected`、`request_count_sent`、`failure_class`、`verdict` 的规范化与校验。
 - **运行状态**（L2 `run_state` 持久化）：`status`（`ready`/`awaiting_approval`/`blocked`/`interrupted`/`reduced`/`reported`）、`review_status`、`completed_slices`、`pending_cleanup` 等实际落盘字段。
 
-两者关系：`phase` 只描述流程位置，**执行许可由 `review_status` 决定**。因此 `pending_review → executing` 这个 phase 跃迁在状态机上是允许的，但同一时刻若 `review_status` 不是 `approved`/`partially_approved`，执行器一律 fail-closed 阻断（`slice_blocked_unreviewed`）。不存在“phase 到了 executing 就能跑”的情况。
+两者关系：`phase` 只描述流程位置，执行许可由方案审核、feasibility 与独立执行授权共同决定。`review_status=approved|partially_approved` 只允许推进到可行性计算；新 TestPackage 只有在 `execution_authorization.status=approved|partially_approved`、授权范围非空且指纹匹配时才能进入 `executing`。缺方案审核记录为 `slice_blocked_unreviewed`，缺执行授权记录为 `slice_blocked_execution_authorization`。不存在“phase 到了 executing”或“方案已批”就能发送请求的情况。
 
 `api_debug` 默认只生成一个最小复现用例，不自动扩展为质量维度；`requirement_validation` 的 `none` 验收项不生成 API 用例。
 
@@ -74,21 +74,23 @@
 所有入口先进入以下流程：
 
 ```text
-intent_received -> preparing -> designing -> pending_review -(审核决定)-> executing -> reducing -> reported
+intent_received -> preparing -> designing -> pending_review -(plan_review)-> feasibility -> pending_execution_approval -(execution_approval)-> executing -> reducing -> reported
 ```
 
-`pending_review` 之后的括号不是 phase，而是 `review_status`：`approved`/`partially_approved` 才能进入 `executing`；`rejected`/`plan_only`/`expired`/`superseded` 停在原地并输出 `review_not_executable`。
+`plan_review` 通过后先计算 `executable = requested ∩ ready`，不能直接进入 `executing`；`rejected`/`plan_only`/`expired`/`superseded` 停在原地并输出 `review_not_executable`。0 executable 进入依赖解决且实际请求数固定为 0；非空 executable 才能申请独立 `execution_approval`。
 
 - AI 生成设计后只能进入 `pending_review`，不得跳过审核进入 `executing`。
 - `approved` 默认审核完整候选范围；`execution_case_ids` 单独表示本轮实际可执行子集。`partially_approved` 仍可表达用户主动缩小设计范围，但不能被技能用来掩盖单纯数据暂不可用；未执行候选保持 `planned_disposition=not_run`。
 - 用例、请求摘要、断言、数据依赖、副作用、环境拓扑/URL/binding、缺口或执行范围变化时，原审核置为 `superseded`，新设计回到 `pending_review`。同一环境、同一 binding key 下的 Secret 值轮换只更新运行值，不改变设计指纹，不触发重审。
-- 设计审核与高风险动作审批分别校验，任一不满足都不得执行对应用例。
+- 方案审核、执行授权与高风险动作审批分别校验，任一适用门禁不满足都不得执行对应用例。高风险 Token 不能替代 `execution_authorization`。
+- 集合不变量固定为 `reviewed ⊆ candidate`、`requested ⊆ reviewed`、`executable = requested ∩ ready`、`authorized ⊆ executable`、`actually_executed ⊆ authorized`；显式空集合不得被默认值扩大。
 
 v2 运行入口为 `scripts/run_orchestrator.py`。每次脚本调用只执行一个确定性动作，但主 Agent 在同一次执行中必须连续调度多个确定性动作，直到真实用户等待点、不可恢复阻断或终态；不得把“一个动作”解释为“一个用户回合”：
 
 1. `compile_and_create_run()`：仅在不存在可复用的活动 Run 时编译并创建统一 Run。已是 `approved`/`partially_approved` 时直接用规范化后的审核创建可执行 Run；`pending_review` 时创建不可执行 Run 并返回设计审批请求；可执行但校验失败时拒绝创建。相同需求、环境和计划指纹已有未终结 Run 时禁止重建。
-2. `record_review()`：把人工决定写回**同一 Run**（`pending_review` → `approved`/`partially_approved`/`rejected`…），推进 `review_status`/`status`/`next_action` 并追加 `review_recorded` 事件。用户批准后的首个动作必须是该回写；审核记录同时保存完整 `reviewed_case_ids` 与本轮 `execution_case_ids`。fail-closed 拒绝：已 `reduced`/`reported` 的 Run、指纹不匹配、范围含未知用例、范围小于已执行用例。
-3. `next_action()`：读取 `state.json`、校验事件账本并返回下一步动作；不得在运行期重新排序任务。审批动作必须携带 `approval_kind=design_review|high_risk_authorization`；前者允许展示完整设计，后者只展示风险增量。
+2. `record_review()`：把方案审核决定写回**同一 Run**（`pending_review` → `approved`/`partially_approved`/`rejected`…），推进到 feasibility 并追加 `review_recorded`。它同时保存完整 `reviewed_case_ids` 与 presence-sensitive 的 `execution_case_ids`，但清空旧执行授权；不得把审核范围回退成执行请求范围。
+3. `record_execution_authorization()`：只在非空 `executable_case_ids` 上记录独立执行授权。授权必须绑定 plan、环境、预计请求数和副作用摘要的 `execution_scope_fingerprint`，并拒绝 blocked、未知、未请求或未就绪用例。等价授权可幂等返回，范围变化必须产生新指纹。
+4. `next_action()`：读取 `state.json`、校验事件账本并返回下一步动作；不得在运行期重新排序任务。审批动作必须携带 `approval_kind=plan_review|execution_approval|high_risk_authorization`；三者不得互相替代。
 4. `execute_slice()`：只执行计划指定的一个切片。执行成功后主 Agent立即再次调用 `next_action()`，普通 Slice 之间不询问用户。
 5. `reduce_run()`：从计划、事件和资源重算 `RunResult`，结果文件存在且内容不同时拒绝覆盖。
 6. `build_requirement_manifest()` / `build_requirement_manifest_for_runs()`：把单个/多个已归约 Run 投影为需求报告清单，最终仍由固定报告器渲染。
@@ -143,13 +145,14 @@ next_action
 
 执行器（`review_adapter.canonical_review` → L2 `validate_review`）按顺序 fail-closed 校验：
 
-1. 状态只能为 `approved` 或 `partially_approved`；
-2. 规范化后的指纹等于当前编译计划的 `plan_fingerprint`（别名解析后仍不等即视为设计已变）；
-3. `reviewed_case_ids`/`approved_case_ids`/`approved_scope` 非空、均存在于当前计划；`execution_case_ids` 必须是审核范围子集。`approved` 默认覆盖完整候选设计，`partially_approved` 只在用户明确缩小设计范围时使用；数据 blocked 不得强迫从审核范围移除；
+1. 方案审核状态只能为 `approved` 或 `partially_approved`；
+2. 规范化后的方案指纹等于当前编译计划的 `plan_fingerprint`（别名解析后仍不等即视为设计已变）；
+3. `reviewed_case_ids`/`approved_case_ids`/`approved_scope` 非空、均存在于当前计划；`execution_case_ids` 必须是审核范围子集且保持 presence-sensitive。`approved` 默认覆盖完整候选设计，`partially_approved` 只在用户明确缩小设计范围时使用；数据 blocked 不得强迫从审核范围移除；
 4. `reviewed_fields` 能覆盖每个获准用例（数组形式自动扇出到全部获准用例）；
 5. 审核未过期、未被新设计取代；
-6. 高风险动作仍有独立审批；
-7. 未批准用例保持 `not_run`，不能被调度器补跑或自动重试。
+6. feasibility 计算后仅非空 executable 可申请执行授权；`authorized_case_ids` 必须是 executable 子集，授权指纹必须匹配；
+7. 高风险动作仍有独立审批；
+8. 未方案审核、未执行授权或未获高风险授权的用例保持 `not_run`，不能被调度器补跑或自动重试。
 
 兼容性：字段别名映射已在本技能内实现（`scripts/review_adapter.py`），调用方不需要知道 L2 内部叫 `approved_scope`/`approved_at`。旧标记 `review_pending`/`approved_with_gaps` 不在支持范围内——它们丢失用例级范围，必须显式改写为 `pending_review` + `approved_case_ids` 后重新审核，不得仅改字符串放行。
 

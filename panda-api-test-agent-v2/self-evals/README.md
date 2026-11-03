@@ -38,6 +38,20 @@
 3. 禁止把真实 curl、Authorization、Basic 凭证、真实订单数据复制进该用例。
 4. 如果后续已经实现可验证的自动清理和完整 Oracle，可在不改变原始场景语义的前提下新增版本化用例，不能直接把本用例的最终 verdict 改成无条件 PASS。
 
+## 用例：单接口测试设计深度
+
+文件：`single-api-design-depth.json`
+
+该用例约束测试设计不得退化为“每维度一条用例”或“只断状态码”。它要求按覆盖义务逐字段、逐非法分区、逐边界点、逐鉴权变体和逐权限场景展开，并验证每条用例具有可审计的覆盖映射、场景类型、执行依赖和三重断言。评测必须保持 `stub_only`，不得访问外部接口。
+
+对应自动化回归测试：
+
+```text
+panda-ai-api-tester-v2/tests/test_single_api_quality.py
+  test_expands_required_parameters_boundaries_and_auth_variants
+  test_cases_have_auditable_obligations_dependencies_and_runner_assertions
+```
+
 ## 重点防回归问题
 
 `DEF-REDUCER-CLEANUP-SYNC`：Slice Executor 已发现清理残留，而 Result Reducer 丢失该状态并输出 `passed`。自评测必须覆盖这一状态，确保业务成功和完整验收通过被严格区分。

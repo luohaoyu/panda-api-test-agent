@@ -45,6 +45,7 @@ SUPPORTED_STATUSES = {
 }
 _TERMINAL_NON_EXECUTABLE = {"rejected", "plan_only", "expired", "superseded"}
 _EXECUTABLE = {"approved", "partially_approved"}
+_EXECUTION_AUTHORIZATION_STATUSES = {"pending_approval", "approved", "partially_approved", "rejected", "expired", "superseded"}
 _REVIEWED_AT_ALIASES = ("approved_at", "reviewed_at", "decided_at")
 _FINGERPRINT_ALIASES = ("plan_fingerprint", "design_fingerprint", "source_design_fingerprint")
 
@@ -225,6 +226,29 @@ def canonical_review(
         "errors": errors,
         "review": canonical,
     }
+
+
+def normalize_execution_authorization(authorization: dict[str, Any], *, package: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the independent execution approval without reusing review scope."""
+    from execution_authorization import derive_side_effect_summary, normalize_execution_authorization as _normalize
+    feasibility = package.get("feasibility") if isinstance(package.get("feasibility"), dict) else {}
+    executable = feasibility.get("execution_case_ids") if "execution_case_ids" in feasibility else feasibility.get("executable_case_ids", [])
+    environment_id = str((package.get("environment") or {}).get("environment_id") or (package.get("test_config") or {}).get("environment_id") or "")
+    normalized, errors = _normalize(
+        authorization,
+        executable_case_ids=executable or [],
+        plan_fingerprint=(package.get("review") or {}).get("plan_fingerprint") or package.get("plan_fingerprint", ""),
+        environment_id=environment_id,
+        request_count_expected=int(package.get("request_count_expected", len(executable or []))),
+        side_effect_summary=derive_side_effect_summary(package, executable or []),
+        blocked_case_ids=feasibility.get("blocked_case_ids") or [],
+    )
+    return {"authorization": normalized, "errors": errors, "execution_allowed": not errors and normalized.get("status") in {"approved", "partially_approved"} and bool(normalized.get("authorized_case_ids"))}
+
+
+def validate_execution_authorization(authorization: dict[str, Any], package: dict[str, Any]) -> list[dict[str, str]]:
+    result = normalize_execution_authorization(authorization, package=package)
+    return [{"code": "EXECUTION_AUTHORIZATION_INVALID", "message": error} for error in result["errors"]]
 
 
 def adapt_review(

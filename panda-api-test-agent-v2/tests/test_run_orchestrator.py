@@ -13,6 +13,7 @@ from run_orchestrator import (
     compile_and_create_run,
     compile_approved_design_to_package,
     next_action,
+    record_execution_authorization,
     reduce_run,
 )
 from plan_compiler import compile_plan
@@ -41,11 +42,28 @@ class RunOrchestratorTests(unittest.TestCase):
         return {
             "status": "approved",
             "approved_case_ids": ["READ"],
+            "execution_case_ids": ["READ"],
             "review_id": "REV-1",
             "reviewer": "qa",
             "approved_at": "2026-11-01T05:00:00+08:00",
             "plan_fingerprint": plan["plan_fingerprint"],
             "reviewed_fields": {"READ": ["case", "request", "assertions", "data_dependencies", "side_effects"]},
+        }
+
+    def _write_evidence(self, root, name):
+        path = root / "evidence" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+        return f"evidence/{name}"
+
+    def _execution_authorization(self, case_ids, authorization_id="AUTH-1"):
+        return {
+            "kind": "execution_approval",
+            "status": "approved",
+            "authorized_case_ids": list(case_ids),
+            "authorization_id": authorization_id,
+            "authorizer": "qa",
+            "authorized_at": "2026-11-01T05:05:00+08:00",
         }
 
     def test_compile_keeps_candidate_omitted_from_tasks_in_plan_as_not_run(self):
@@ -75,11 +93,11 @@ class RunOrchestratorTests(unittest.TestCase):
         self.assertEqual(result["run"]["run_id"], "RUN-ORCH-1")
         self.assertTrue((root / "run.json").is_file())
         self.assertTrue((root / "plan.json").is_file())
-        self.assertEqual(result["next_action"]["action"], "request_approval")
-        self.assertEqual(result["next_action"]["approval_kind"], "design_review")
+        self.assertEqual(result["next_action"]["action"], "request_plan_review")
+        self.assertEqual(result["next_action"]["approval_kind"], "plan_review")
         action = next_action(root)
-        self.assertEqual(action["action"], "request_approval")
-        self.assertEqual(action["approval_kind"], "design_review")
+        self.assertEqual(action["action"], "request_plan_review")
+        self.assertEqual(action["approval_kind"], "plan_review")
         self.assertFalse(action["design_review_still_valid"])
         self.assertEqual(action["slice_id"], "S1")
 
@@ -88,10 +106,12 @@ class RunOrchestratorTests(unittest.TestCase):
         intent = self._intent()
         intent["review"] = self._approved_review(intent)
         compile_and_create_run(intent, root, run_id="RUN-ORCH-2")
+        record_execution_authorization(root, self._execution_authorization(["READ"], "AUTH-ORCH-2"))
+        evidence_ref = self._write_evidence(root, "read.json")
         executed = execute_slice(
             root,
             "S1",
-            task_executor=lambda task, **_: {"status": "passed", "evidence_ref": "evidence/read.json"},
+            task_executor=lambda task, **_: {"status": "passed", "evidence_ref": evidence_ref},
         )
         self.assertEqual(executed["status"], "passed")
         result = reduce_run(root)
@@ -116,6 +136,7 @@ class RunOrchestratorTests(unittest.TestCase):
         intent["review"] = {
             "status": "approved",
             "approved_case_ids": ["FIRST", "SECOND"],
+            "execution_case_ids": ["FIRST", "SECOND"],
             "review_id": "REV-MULTI",
             "reviewer": "qa",
             "approved_at": "2026-11-01T05:00:00+08:00",
@@ -123,6 +144,8 @@ class RunOrchestratorTests(unittest.TestCase):
             "reviewed_fields": ["case", "request", "assertions", "data_dependencies", "side_effects"],
         }
         compile_and_create_run(intent, root, run_id="RUN-MULTI")
+        self.assertEqual(next_action(root)["action"], "request_execution_approval")
+        record_execution_authorization(root, self._execution_authorization(["FIRST", "SECOND"], "AUTH-MULTI"))
         self.assertEqual(next_action(root)["slice_id"], "S1")
         execute_slice(root, "S1", task_executor=lambda task, **_: {"status": "passed", "evidence_ref": "evidence/first.json"})
         second = next_action(root)
@@ -160,6 +183,7 @@ class RunOrchestratorTests(unittest.TestCase):
         intent["review"] = {
             "status": "approved",
             "approved_case_ids": ["DELETE"],
+            "execution_case_ids": ["DELETE"],
             "review_id": "REV-RISK",
             "reviewer": "qa",
             "approved_at": "2026-11-01T05:00:00+08:00",
@@ -167,6 +191,8 @@ class RunOrchestratorTests(unittest.TestCase):
             "reviewed_fields": ["case", "request", "assertions", "data_dependencies", "side_effects"],
         }
         compile_and_create_run(intent, root, run_id="RUN-RISK")
+        self.assertEqual(next_action(root)["approval_kind"], "execution_approval")
+        record_execution_authorization(root, self._execution_authorization(["DELETE"], "AUTH-RISK"))
         action = next_action(root)
         self.assertEqual(action["approval_kind"], "high_risk_authorization")
         self.assertTrue(action["design_review_still_valid"])
@@ -204,6 +230,7 @@ class RunOrchestratorTests(unittest.TestCase):
             "review": {
                 "status": "approved",
                 "approved_case_ids": ["C1"],
+                "execution_case_ids": ["C1"],
                 "review_id": "REV-PACKAGE-1",
                 "reviewer": "user",
                 "approved_at": "2026-11-01T10:00:00+08:00",
@@ -242,7 +269,9 @@ class RunOrchestratorTests(unittest.TestCase):
         intent = self._intent()
         intent["review"] = self._approved_review(intent)
         compile_and_create_run(intent, root, run_id="RUN-ORCH-3")
-        execute_slice(root, "S1", task_executor=lambda task, **_: {"status": "passed", "evidence_ref": "evidence/read.json"})
+        record_execution_authorization(root, self._execution_authorization(["READ"], "AUTH-ORCH-3"))
+        evidence_ref = self._write_evidence(root, "read.json")
+        execute_slice(root, "S1", task_executor=lambda task, **_: {"status": "passed", "evidence_ref": evidence_ref})
         reduce_run(root)
         result_path = root / "result.json"
         saved = json.loads(result_path.read_text(encoding="utf-8"))

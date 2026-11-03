@@ -88,30 +88,6 @@ class PlanCompilerTests(unittest.TestCase):
         self.assertEqual(by_id["CLEAN"]["evidence_kind"], "cleanup")
         self.assertIn("CLEAN", plan["cleanup_obligations"]["task_ids"])
 
-    def test_validates_explicit_redis_oracle_and_marks_builtin_executor(self):
-        declaration = {
-            "oracle_id": "OR-R",
-            "kind": "redis",
-            "binding": "uat_redis",
-            "command": "GET",
-            "args": ["order:${order_id}"],
-            "assertions": [{"assertion_id": "A-R", "source": "result", "operator": "equals", "expected": "CREATED"}],
-        }
-        plan = compile_plan(base_intent([{"task_id": "ORACLE", "type": "oracle", "oracle_type": "redis", **declaration}]))
-        self.assertEqual(plan["tasks"][0]["builtin_oracle_executor"], "redis")
-        declaration["command"] = "SET"
-        with self.assertRaisesRegex(PlanCompileError, "not allowed"):
-            compile_plan(base_intent([{"task_id": "ORACLE", "type": "oracle", "oracle_type": "redis", **declaration}]))
-
-    def test_unknown_and_free_form_oracles_do_not_select_builtin_executor(self):
-        plan = compile_plan(base_intent([
-            {"task_id": "UNKNOWN", "type": "oracle", "oracle_type": "manual", "verification": {"query": "order"}},
-            {"task_id": "LEGACY-DB", "type": "oracle", "oracle_type": "db", "verification": {"query": "order"}},
-        ]))
-        by_id = {task["task_id"]: task for task in plan["tasks"]}
-        self.assertNotIn("builtin_oracle_executor", by_id["UNKNOWN"])
-        self.assertNotIn("builtin_oracle_executor", by_id["LEGACY-DB"])
-
     def test_special_task_requires_its_declared_contract(self):
         with self.assertRaisesRegex(PlanCompileError, "fixture_name"):
             compile_plan(base_intent([{ "task_id": "FIX", "type": "fixture" }]))

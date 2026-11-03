@@ -215,14 +215,20 @@ def _validate_unified_review(review: dict[str, Any], plan: dict[str, Any], case_
     contract and the stored contract cannot drift apart again.
     """
     canonical = _canonical_review(review, case_ids)
-    errors = [item["message"] for item in canonical["errors"]]
-    if not canonical["execution_allowed"] and not errors:
-        errors.append(f"review status {canonical['status']} is not executable")
+    structured_errors = list(canonical["errors"])
+    if not canonical["execution_allowed"] and not structured_errors:
+        structured_errors.append({
+            "code": "REVIEW_NOT_EXECUTABLE",
+            "message": f"review status {canonical['status']} is not executable",
+        })
     declared = (canonical["review"] or {}).get("plan_fingerprint")
     if declared and declared != plan.get("plan_fingerprint"):
-        errors.append("review fingerprint does not match the compiled plan fingerprint; the design changed after approval")
-    if errors:
-        raise OrchestrationError(_format_review_errors(canonical["errors"]))
+        structured_errors.append({
+            "code": "REVIEW_FINGERPRINT_MISMATCH",
+            "message": "review fingerprint does not match the compiled plan fingerprint; the design changed after approval",
+        })
+    if structured_errors:
+        raise OrchestrationError(_format_review_errors(structured_errors))
     return canonical["review"]
 
 
@@ -273,17 +279,35 @@ def compile_and_create_run(intent: dict[str, Any], run_dir: str | Path, *, run_i
             "scope": intent.get("scope") or {},
             "source_refs": intent.get("source_refs") or [],
             "request_count_expected": intent.get("request_count_expected", 0),
+            "execution_authorization": intent.get("execution_authorization") if isinstance(intent.get("execution_authorization"), dict) else None,
+            "authorization_model": "independent",
         },
     )
-    initial_action = "execute_slice" if normalized_review.get("status") in entry_state_mod.EXECUTABLE_REVIEWS else "request_approval" if normalized_review.get("status") == "pending_review" else "review_not_executable"
+    requested = normalized_review.get("execution_case_ids") if "execution_case_ids" in normalized_review else normalized_review.get("requested_case_ids", [])
+    initial_action = (
+        "request_plan_review"
+        if normalized_review.get("status") == "pending_review"
+        else "request_execution_approval"
+        if normalized_review.get("status") in entry_state_mod.EXECUTABLE_REVIEWS and requested
+        else "resolve_dependencies"
+        if normalized_review.get("status") in entry_state_mod.EXECUTABLE_REVIEWS
+        else "review_not_executable"
+    )
     initial_next_action = {
         "action": initial_action,
         "slice_id": "S1" if initial_action == "execute_slice" else None,
     }
-    if initial_action == "request_approval":
+    if initial_action == "request_plan_review":
         initial_next_action.update({
-            "approval_kind": "design_review",
+            "approval_kind": "plan_review",
             "design_review_still_valid": False,
+        })
+    elif initial_action == "request_execution_approval":
+        initial_next_action.update({
+            "approval_kind": "execution_approval",
+            "design_review_still_valid": True,
+            "execution_case_ids": list(requested or []),
+            "plan_fingerprint": plan.get("plan_fingerprint"),
         })
     state.append_event(run_dir, {
         "type": "review_recorded",
@@ -296,6 +320,49 @@ def compile_and_create_run(intent: dict[str, Any], run_dir: str | Path, *, run_i
         "fingerprint_source": normalized_review.get("fingerprint_source"),
     })
     return {"run": head, "plan": plan, "next_action": initial_next_action, "review": normalized_review}
+
+
+def record_execution_authorization(run_dir: str | Path, authorization: dict[str, Any]) -> dict[str, Any]:
+    """Persist an independent execution authorization; review never grants it."""
+    root = Path(run_dir).resolve()
+    state_mod = _load("run_state")
+    plan = _read_json(root / "plan.json")
+    state = state_mod.load_state(root)
+    if not state.get("reviewed_case_ids") and not state.get("approved_case_ids"):
+        raise OrchestrationError("PLAN_REVIEW_REQUIRED: execution authorization requires a recorded plan review")
+    executable = list(state.get("executable_case_ids") or [])
+    if not executable:
+        raise OrchestrationError("EXECUTION_SCOPE_EMPTY: zero executable cases cannot request execution approval")
+    authorization_context = copy.deepcopy(plan)
+    authorization_context["feasibility"] = {
+        "execution_case_ids": executable,
+        "executable_case_ids": executable,
+        "blocked_case_ids": list(state.get("blocked_case_ids") or []),
+    }
+    authorization_context["environment"] = {
+        "environment_id": state.get("environment_id")
+        or (_read_json(root / "run.json").get("environment_snapshot") or {}).get("environment_id")
+    }
+    authorization_context["review"] = copy.deepcopy(state.get("review") or {})
+    authorization_context["review"]["plan_fingerprint"] = plan.get("plan_fingerprint")
+    authorization_context["request_count_expected"] = int(state.get("request_count_expected") or len(executable))
+    adapter = _adapter()
+    normalized = adapter.normalize_execution_authorization(authorization, package=authorization_context)
+    if normalized["errors"]:
+        raise OrchestrationError("; ".join(normalized["errors"]))
+    envelope = normalized["authorization"]
+    state_mod.update_state(root, {
+        "execution_authorization": envelope,
+        "authorized_case_ids": list(envelope.get("authorized_case_ids") or []),
+        "executable_case_ids": executable,
+        "next_action": "execute_slice" if normalized["execution_allowed"] else "request_execution_approval",
+        "status": "ready" if normalized["execution_allowed"] else "blocked",
+        "phase": "executing" if normalized["execution_allowed"] else "pending_review",
+        "last_action": "record_execution_authorization",
+        "failure_class": None,
+    })
+    state_mod.append_event(root, {"type": "execution_authorization_recorded", "authorization_id": envelope.get("authorization_id"), "status": envelope.get("status"), "authorized_case_ids": envelope.get("authorized_case_ids") or [], "execution_scope_fingerprint": envelope.get("execution_scope_fingerprint")})
+    return {"run_dir": str(root), "authorization": envelope, "next_action": "execute_slice" if normalized["execution_allowed"] else "request_execution_approval"}
 
 
 def record_review(run_dir: str | Path, review: dict[str, Any]) -> dict[str, Any]:
@@ -350,11 +417,11 @@ def record_review(run_dir: str | Path, review: dict[str, Any]) -> dict[str, Any]
             "status": "awaiting_approval",
             "phase": "pending_review",
             "last_action": "record_review",
-            "next_action": "request_approval",
+            "next_action": "request_plan_review",
             "approved_case_ids": [],
         })
         state_mod.append_event(root, {"type": "review_recorded", "source": "record_review", "review_status": status, "review_id": canonical["review"].get("review_id")})
-        return {"run_dir": str(root), "review_status": status, "approved_case_ids": [], "next_action": "request_approval"}
+        return {"run_dir": str(root), "review_status": status, "approved_case_ids": [], "next_action": "request_plan_review"}
 
     if canonical["errors"]:
         raise OrchestrationError(_format_review_errors(canonical["errors"]))
@@ -379,17 +446,52 @@ def record_review(run_dir: str | Path, review: dict[str, Any]) -> dict[str, Any]
         if dropped:
             raise OrchestrationError("approval scope no longer covers already executed cases: " + ", ".join(dropped))
 
+    if "execution_case_ids" in approved:
+        requested = approved.get("execution_case_ids")
+    elif "requested_case_ids" in approved:
+        requested = approved.get("requested_case_ids")
+    else:
+        requested = []
+    requested = list(dict.fromkeys(requested or []))
+    unknown_requested = sorted(set(requested) - set(scope))
+    if unknown_requested:
+        raise OrchestrationError(
+            "execution request contains cases outside reviewed scope: "
+            + ", ".join(unknown_requested)
+        )
+    task_by_case = {
+        item.get("case_id") or item.get("task_id"): item
+        for item in plan.get("tasks") or []
+        if isinstance(item, dict) and (item.get("case_id") or item.get("task_id"))
+    }
+    executable = []
+    blocked = []
+    for case_id in requested:
+        task = task_by_case.get(case_id) or {}
+        if task.get("planned_disposition") == "not_run":
+            blocked.append(case_id)
+        else:
+            executable.append(case_id)
+    next_step = "request_execution_approval" if executable else "resolve_dependencies"
     state_mod.update_state(root, {
         "review_status": approved.get("status"),
         "review": approved,
         "review_id": approved.get("review_id"),
         "approved_case_ids": scope,
+        "reviewed_case_ids": scope,
+        "requested_case_ids": requested,
+        "execution_case_ids": requested,
+        "executable_case_ids": executable,
+        "blocked_case_ids": blocked,
+        "authorized_case_ids": [],
+        "execution_authorization": None,
         "plan_fingerprint": plan.get("plan_fingerprint"),
         "design_fingerprint": approved.get("design_fingerprint"),
-        "phase": "executing",
-        "status": "ready",
+        "phase": "pending_review",
+        "status": "blocked",
         "last_action": "record_review",
-        "next_action": "execute_slice",
+        "next_action": next_step,
+        "failure_class": None if requested else "no_execution_cases_requested",
     })
     state_mod.append_event(root, {
         "type": "review_recorded",
@@ -405,7 +507,7 @@ def record_review(run_dir: str | Path, review: dict[str, Any]) -> dict[str, Any]
         "run_dir": str(root),
         "review_status": approved.get("status"),
         "approved_case_ids": scope,
-        "next_action": "execute_slice",
+        "next_action": next_step,
     }
 
 
@@ -465,13 +567,22 @@ def next_action(run_dir: str | Path) -> dict[str, Any]:
         return {"action": "review_not_executable", "reason": f"review status {state.get('review_status')} is not executable"}
     if state.get("review_status") == "pending_review" or state.get("status") == "awaiting_approval":
         return {
-            "action": "request_approval",
-            "approval_kind": "design_review",
+            "action": "request_plan_review",
+            "approval_kind": "plan_review",
             "design_review_still_valid": False,
             "slice_id": state.get("next_slice_id"),
             "approved_case_ids": state.get("approved_case_ids") or [],
             "plan_fingerprint": plan.get("plan_fingerprint"),
         }
+    requested = state.get("requested_case_ids") if "requested_case_ids" in state else state.get("execution_case_ids", [])
+    executable = state.get("executable_case_ids") if "executable_case_ids" in state else requested
+    authorized = state.get("authorized_case_ids") if "authorized_case_ids" in state else []
+    if not requested:
+        return {"action": "resolve_dependencies", "diagnostic_code": "NO_EXECUTION_CASES_REQUESTED"}
+    if not executable:
+        return {"action": "resolve_dependencies", "diagnostic_code": "NO_READY_EXECUTION_CASES", "requested_case_ids": requested}
+    if not authorized:
+        return {"action": "request_execution_approval", "approval_kind": "execution_approval", "execution_case_ids": executable, "plan_fingerprint": plan.get("plan_fingerprint")}
     recovery = executor.validate_recovery(root)
     if recovery["action"] == "cleanup_first":
         return {"action": "execute_cleanup_first", "slice_ids": recovery.get("cleanup_slice_ids") or [], "recovery": recovery,

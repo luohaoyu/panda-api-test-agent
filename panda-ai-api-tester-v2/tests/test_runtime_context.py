@@ -19,7 +19,6 @@ from runtime_context import (
     package_secret_keys,
     package_execution_preflight,
     preflight,
-    resource_binding_spec,
 )
 import runner
 
@@ -59,22 +58,6 @@ class RuntimeContextTests(unittest.TestCase):
                             "format": "string",
                         },
                     },
-                    "databases": {
-                        "orders": {
-                            "key": "TEST3_ORDERS_DB",
-                            "required": False,
-                            "secret": True,
-                            "format": "db_config",
-                        }
-                    },
-                    "redis": {
-                        "session": {
-                            "key": "TEST3_SESSION_REDIS",
-                            "required": False,
-                            "secret": True,
-                            "format": "redis_config",
-                        }
-                    },
                 },
             },
             "gates": [
@@ -103,8 +86,6 @@ class RuntimeContextTests(unittest.TestCase):
             "TEST3_ALLOWED_ORIGINS": "https://test.example",
             "TEST3_READ_ONLY_OPERATIONS": "POST /preview",
             "TEST3_TOKEN": "secret-token-value",
-            "TEST3_ORDERS_DB": {"driver": "sqlite", "path": "orders.db", "options": {"mode": "ro"}},
-            "TEST3_SESSION_REDIS": {"host": "127.0.0.1", "port": 6379, "db": 2},
         }
 
     def test_context_is_immutable_and_secret_metadata_has_no_values(self):
@@ -116,29 +97,17 @@ class RuntimeContextTests(unittest.TestCase):
         self.assertNotIn("secret-token-value", json.dumps(metadata))
         self.assertEqual(metadata["values_persisted"], False)
         self.assertEqual(metadata["schema_version"], "2.0")
-        self.assertEqual(context.secret_keys, frozenset({"TEST3_TOKEN", "TEST3_ORDERS_DB", "TEST3_SESSION_REDIS"}))
-        with self.assertRaises(TypeError):
-            context.require("TEST3_ORDERS_DB")["path"] = "changed.db"
-        with self.assertRaises(TypeError):
-            context.require("TEST3_ORDERS_DB")["options"]["mode"] = "rw"
+        self.assertEqual(context.secret_keys, frozenset({"TEST3_TOKEN"}))
 
     def test_binding_schema_is_centralized(self):
         package = self._package()
         self.assertEqual(
             package_binding_keys(package),
-            {"TEST3_BASE_URL", "TEST3_ALLOWED_ORIGINS", "TEST3_READ_ONLY_OPERATIONS", "TEST3_TOKEN", "TEST3_ORDERS_DB", "TEST3_SESSION_REDIS"},
+            {"TEST3_BASE_URL", "TEST3_ALLOWED_ORIGINS", "TEST3_READ_ONLY_OPERATIONS", "TEST3_TOKEN"},
         )
-        self.assertEqual(package_secret_keys(package), {"TEST3_TOKEN", "TEST3_ORDERS_DB", "TEST3_SESSION_REDIS"})
+        self.assertEqual(package_secret_keys(package), {"TEST3_TOKEN"})
         self.assertEqual(binding_spec(package, "base_url")["format"], "url")
-        self.assertEqual(resource_binding_spec(package, "databases", "orders")["format"], "db_config")
-        self.assertEqual(resource_binding_spec(package, "redis", "session")["format"], "redis_config")
         self.assertEqual(auth_config(package)["type"], "bearer")
-
-    def test_named_resources_require_all_binding_metadata_fields(self):
-        package = self._package()
-        package["environment"]["runtime_bindings"]["databases"]["orders"].pop("secret")
-        errors = preflight(package, RuntimeContext.from_mapping("test3", {}))
-        self.assertIn("missing fields: secret", " ".join(errors))
 
     def test_preflight_fails_before_runner_when_binding_is_missing(self):
         package = self._package()
@@ -220,14 +189,6 @@ class RuntimeContextTests(unittest.TestCase):
     def test_binding_formats_are_validated(self):
         package = self._package()
         values = self._values()
-        values["TEST3_ORDERS_DB"] = "sqlite:///orders.db"
-        with self.assertRaisesRegex(RuntimeContextError, "structured db_config"):
-            build_runtime_context(package, values)
-        values = self._values()
-        values["TEST3_SESSION_REDIS"] = "redis://localhost/0"
-        with self.assertRaisesRegex(RuntimeContextError, "structured redis_config"):
-            build_runtime_context(package, values)
-        values = self._values()
         values["TEST3_BASE_URL"] = "https://user:password@test.example?bad=1"
         with self.assertRaisesRegex(RuntimeContextError, "origin-safe"):
             build_runtime_context(package, values)
@@ -247,7 +208,7 @@ class RuntimeContextTests(unittest.TestCase):
             "username": {"key": "TEST3_USER", "required": True, "secret": False, "format": "string"},
             "password": {"key": "TEST3_PASSWORD", "required": True, "secret": True, "format": "string"},
         }
-        self.assertEqual(package_secret_keys(package), {"TEST3_PASSWORD", "TEST3_ORDERS_DB", "TEST3_SESSION_REDIS"})
+        self.assertEqual(package_secret_keys(package), {"TEST3_PASSWORD"})
         values = {
             "TEST3_BASE_URL": "https://test.example",
             "TEST3_ALLOWED_ORIGINS": "https://test.example",

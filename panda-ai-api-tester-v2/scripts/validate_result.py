@@ -307,31 +307,6 @@ def validate_result(data, result_dir=None):
         errors.append("contract missing required interface profile identity fields: " + ", ".join(missing_contract))
     if contract.get("governance_schema_version") != "1.0":
         errors.append("contract governance_schema_version must be 1.0")
-    contracts = data.get("contracts")
-    if contracts is not None:
-        if not isinstance(contracts, list) or not contracts:
-            errors.append("contracts must be a non-empty list when present")
-        else:
-            roles = []
-            for index, binding in enumerate(contracts):
-                if not isinstance(binding, dict):
-                    errors.append(f"contracts[{index}] must be an object")
-                    continue
-                role = str(binding.get("role") or "").strip().lower()
-                roles.append(role)
-                if role not in {"trigger", "oracle", "negative_oracle"}:
-                    errors.append(f"contracts[{index}].role is invalid: {role or 'missing'}")
-                missing_binding = [field for field in required_contract if binding.get(field) in (None, "")]
-                if missing_binding:
-                    errors.append(
-                        f"contracts[{index}] missing identity fields: " + ", ".join(missing_binding)
-                    )
-            if roles.count("trigger") != 1:
-                errors.append("contracts requires exactly one trigger binding")
-            trigger = next((item for item in contracts if str(item.get("role") or "").lower() == "trigger"), {})
-            for field in ("profile_id", "profile_revision", "contract_fingerprint"):
-                if str(trigger.get(field)) != str(contract.get(field)):
-                    errors.append(f"contract must mirror the trigger binding for {field}")
     if not isinstance(contract.get("profile_revision"), int) or contract.get("profile_revision", 0) < 1:
         errors.append("contract profile_revision must be a positive integer")
     execution_profile = data.get("execution_profile")

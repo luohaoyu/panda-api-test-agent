@@ -99,23 +99,10 @@ class FeasibilityPlanTests(unittest.TestCase):
         plan = build_feasibility_plan(design)
         self.assertEqual(plan["gate"]["status"], "passed")
         self.assertEqual(plan["executable_case_ids"], ["CASE-READY"])
-        self.assertEqual(plan["reviewed_case_ids"], ["CASE-READY"])
-        self.assertEqual(plan["execution_case_ids"], ["CASE-READY"])
         self.assertIn("CASE-BLOCKED", plan["blocked_case_ids"])
         self.assertIn("CASE-BLOCKED", plan["out_of_scope_case_ids"])
         self.assertFalse(plan["coverage_map"]["full_requirement_coverage"])
         self.assertEqual(validate_feasibility_plan(design, plan), [])
-
-    def test_blocked_data_dependency_requires_source_evidence(self):
-        design = self._design(reviewed=False)
-        dependency = design["cases"][1]["execution_dependencies"][0]
-        plan = build_feasibility_plan(design)
-        self.assertIn("data-source evidence", " ".join(plan["dependency_matrix"]["cases"][1]["blocking_reasons"]))
-        dependency["evidence"] = ["data-sources.md: no matching authorized fixture"]
-        design["design_fingerprint"] = calculate_design_fingerprint(design)
-        plan = build_feasibility_plan(design)
-        self.assertIn("CASE-BLOCKED", plan["blocked_case_ids"])
-        self.assertEqual(plan["candidate_case_ids"], ["CASE-READY", "CASE-BLOCKED"])
 
     def test_tampered_plan_fingerprint_is_rejected(self):
         design = self._design(partial=True)

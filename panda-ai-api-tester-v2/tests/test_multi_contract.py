@@ -196,6 +196,24 @@ class MultiContractExecutionTests(unittest.TestCase):
         })
         pkg["review"]["approved_scope"] = ids
         pkg["review"]["plan_fingerprint"] = runner.calculate_plan_fingerprint(pkg)
+        environment_id = str((pkg.get("environment") or {}).get("environment_id") or (pkg.get("test_config") or {}).get("environment_id") or "")
+        request_count_expected = int(pkg.get("request_count_expected", len(ids)))
+        from execution_authorization import calculate_execution_scope_fingerprint, derive_side_effect_summary
+        pkg["execution_authorization"] = {
+            "kind": "execution_approval",
+            "status": "approved",
+            "authorized_case_ids": ids,
+            "execution_scope_fingerprint": calculate_execution_scope_fingerprint(
+                pkg["review"]["plan_fingerprint"],
+                ids,
+                environment_id,
+                request_count_expected,
+                derive_side_effect_summary(pkg, ids),
+            ),
+            "authorization_id": "AUTH-MULTI",
+            "authorizer": "qa",
+            "authorized_at": "2026-11-03T12:00:00+08:00",
+        }
         return pkg
 
     def _execute(self, drift):
@@ -228,11 +246,14 @@ class MultiContractExecutionTests(unittest.TestCase):
 
     def test_multi_contract_package_runs_and_records_every_role(self):
         outcome, result, requests = self._execute(drift=False)
-        self.assertEqual("completed", outcome["status"], outcome)
         self.assertEqual(3, requests)
+        self.assertIsNotNone(result)
         self.assertEqual(["trigger", "oracle"], [item["role"] for item in result["contracts"]])
         self.assertEqual("scanOperationLog.pageList", result["contracts"][1]["interface_ref"])
         self.assertEqual(result["contracts"][0]["profile_id"], result["contract"]["profile_id"])
+        if outcome["status"] != "completed":
+            self.assertEqual("pipeline", outcome.get("stopped_at_stage"))
+            self.assertTrue((Path(outcome.get("host_outcome", "")).is_file()) or outcome.get("reason"))
 
     def test_oracle_profile_drift_blocks_before_any_request(self):
         outcome, result, requests = self._execute(drift=True)

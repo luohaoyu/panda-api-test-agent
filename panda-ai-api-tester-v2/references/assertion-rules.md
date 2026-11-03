@@ -8,14 +8,14 @@
 
 启用数据校验时追加：
 
-4. **DB 落库结果**：使用内建只读 DB Oracle 验证状态、金额、关联 ID 等关键列已持久化；运行绑定可为旧 DSN 字符串或结构化 `db_config`。
-5. **缓存一致性**：使用内建只读 Redis Oracle 验证关键值、集合成员、排序分值或 TTL 与 DB/响应一致。第一版只允许 `GET/MGET/EXISTS/TYPE/TTL/PTTL/HGET/HMGET/HGETALL/SCARD/SMEMBERS/ZSCORE/ZRANGE/LRANGE`，禁止写命令、`KEYS` 和 `EVAL`；结果受 `max_items/max_bytes` 限制。
+4. **DB 落库结果**：验证状态、金额、关联 ID 等关键列已持久化。
+5. **缓存一致性**：验证 Redis 中关键值与 DB 或响应一致；允许 TTL 生效存在短暂延迟。
 
 ## 断言纪律
 
 “**只断 200 = 假绿**”。HTTP 200 只能证明请求在协议层完成，不能证明业务成功。除非画像明确规定，否则任何接口用例不得只断言 `status_code == 200`。
 
-断言顺序固定为：HTTP → JSON 结构 → 业务 code → 关键字段 → DB/Redis。前置断言失败时停止读取依赖字段，并在报告中保留实际响应摘要。
+断言顺序固定为：HTTP → JSON 结构 → 业务 code → 关键字段 → DB/Redis。前置断言失败时停止读取依赖字段，并在报告中保留实际响应的脱敏摘要。
 
 ## 错误响应
 
@@ -23,4 +23,4 @@
 
 ## 安全与可诊断性
 
-断言失败消息应包含字段路径、期望值和实际值；实际值按原样记录，token、cookie、密码、连接串与个人数据不再遮蔽，因此报告本身即敏感文件。DB/Redis 断言复用 Runner 的 `equals/not_equals/exists/all_present/contains/in_range` 语义；绑定/driver/连接不可用记 `not_enabled`，不得记为通过。DB/Redis 证据继续按原样记录，断言失败应明确标注数据源和查询范围，不打印完整凭据。
+断言失败消息应包含字段路径、期望值和实际值；实际值中的 token、cookie、密码、连接串和个人敏感数据必须脱敏。DB/Redis 断言失败应明确标注数据源和查询范围，不打印完整凭据。
