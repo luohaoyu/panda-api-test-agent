@@ -1,0 +1,84 @@
+panda-ai-api-tester-v2/SKILL.md
+  h_e9ab747020676c 5,12,54,56-57,100,113-114,117,120,126,131,171,174,179,221
+panda-ai-api-tester-v2/references/acceptance-report-spec.md
+  h_e9ab747020676c 72-73
+panda-ai-api-tester-v2/references/assertion-rules.md
+  h_e9ab747020676c 11-12,18,26
+panda-ai-api-tester-v2/references/case-design-rules.md
+  h_e9ab747020676c 28
+panda-ai-api-tester-v2/references/report-spec.md
+  h_e9ab747020676c 19,52
+panda-ai-api-tester-v2/references/review-spec.md
+  h_e9ab747020676c 52
+panda-ai-api-tester-v2/references/test-package-spec.md
+  h_e9ab747020676c 1,5,141,186,271,302,307
+panda-ai-api-tester-v2/scripts/execution_authorization.py
+  h_e9ab747020676c 1-173
+panda-ai-api-tester-v2/scripts/feasibility_plan.py
+  h_e9ab747020676c 70-71,75-86,88-89,91-93,160-161,189-190,207,259,262,277,280,325,334,337-338,342,344,357-359,361-362
+panda-ai-api-tester-v2/scripts/package_compiler.py
+  h_e9ab747020676c 110,166,168,186,191
+panda-ai-api-tester-v2/scripts/plan_compiler.py
+  h_e9ab747020676c 266,301
+panda-ai-api-tester-v2/scripts/render_report.py
+  h_e9ab747020676c 15,47,128-131,135-147,149,153,166-167,169-170,185,216-218,233,270,272
+panda-ai-api-tester-v2/scripts/run_state.py
+  h_e9ab747020676c 100-102,114
+panda-ai-api-tester-v2/scripts/runner.py
+  h_e9ab747020676c 24-29,213-220,223-270,293-317,319,322,327-342,709,713,718,773-774,803-804,850,852,854,968-970,976,991,994,999,1025,1027,1031,1096,1157-1158,1160,1162-1163,1226,1230-1231,1257,1259-1274,1566,1584,1589,1594-1595,1597,1640-1641,1668-1669
+panda-ai-api-tester-v2/scripts/runtime_context.py
+  h_e9ab747020676c 38,70,91-93
+panda-ai-api-tester-v2/scripts/slice_executor.py
+  h_e9ab747020676c 257,262-264,272-275
+panda-ai-api-tester-v2/scripts/trusted_host.py
+  h_e9ab747020676c 4-7,105-108,111-112,158-163,219
+panda-ai-api-tester-v2/tests/test_end_to_end_stub.py
+  h_e9ab747020676c 127,131,293,306,341,353,355,360-362
+panda-ai-api-tester-v2/tests/test_execution_authorization_contract.py
+  h_e9ab747020676c 1-245
+panda-ai-api-tester-v2/tests/test_multi_contract.py
+  h_e9ab747020676c 199-216,250,254-256
+panda-ai-api-tester-v2/tests/test_report_evidence_embed.py
+  h_e9ab747020676c 1,20,23,45-50,62,74-77,88-90,107,112,114-115
+panda-ai-api-tester-v2/tests/test_runtime_context.py
+  h_e9ab747020676c 100,106,108,211
+panda-ai-api-tester-v2/tests/test_trusted_host.py
+  h_e9ab747020676c 63-64,71,117-118,133-136,165-168
+panda-api-test-agent-v2/SKILL.md
+  h_e9ab747020676c 18,118,120-122,135-136,146,179-184
+panda-api-test-agent-v2/references/interaction-rules.md
+  h_e9ab747020676c 95-96,101-102,104,147-165
+panda-api-test-agent-v2/references/orchestration-rules.md
+  h_e9ab747020676c 50,77,80,85-86,91-93,148-150,153-155
+panda-api-test-agent-v2/scripts/entry_state.py
+  h_e9ab747020676c 83-84,86,88,100-104,147-148,183,186-189,194
+panda-api-test-agent-v2/scripts/execution_diagnostics.py
+  h_e9ab747020676c 16,297-298,323-333
+panda-api-test-agent-v2/scripts/review_adapter.py
+  h_e9ab747020676c 48,231-253
+panda-api-test-agent-v2/scripts/run_orchestrator.py
+  h_e9ab747020676c 218-223,226-231,282-283,286-295,300,302,305-311,325-367,420,424,449-475,481-487,490-491,493-494,510,570-571,577-585
+panda-api-test-agent-v2/self-evals/README.md
+  h_e9ab747020676c 41-54
+panda-api-test-agent-v2/self-evals/single-api-design-depth.json
+  h_e9ab747020676c 1-55
+panda-api-test-agent-v2/tests/test_external_evidence.py
+  h_e9ab747020676c 54-58
+panda-api-test-agent-v2/tests/test_review_contract_closure.py
+  h_e9ab747020676c 20-25,35,71,80-97,101,105-107,182-183,185-187,208,210-212,224,231,264,267,281,284,295,298
+panda-api-test-agent-v2/tests/test_run_orchestrator.py
+  h_e9ab747020676c 16,45,53-68,96-97,99-100,109-110,114,139,147-148,186,194-195,233,272-274
+panda-api-test-agent-v2/tests/test_unified_entry_state.py
+  h_e9ab747020676c 15,18-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "132c8f149cdea2822582d2f8fbe45b61f744bf70",
+  "prompts": {},
+  "humans": {
+    "h_e9ab747020676c": {
+      "author": "罗豪宇 <zt000886@zt.com>"
+    }
+  }
+}
