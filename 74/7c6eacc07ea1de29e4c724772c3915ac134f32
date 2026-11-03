@@ -1,0 +1,130 @@
+panda-ai-api-tester-v2/SKILL.md
+  h_e9ab747020676c 38-40,42-43,61-63,106,119-120,126,132,137,177,180,186,228-233
+panda-ai-api-tester-v2/references/acceptance-report-spec.md
+  h_e9ab747020676c 72-73
+panda-ai-api-tester-v2/references/assertion-rules.md
+  h_e9ab747020676c 11-12,18,26
+panda-ai-api-tester-v2/references/case-design-rules.md
+  h_e9ab747020676c 28
+panda-ai-api-tester-v2/references/report-spec.md
+  h_e9ab747020676c 19,52
+panda-ai-api-tester-v2/references/review-spec.md
+  h_e9ab747020676c 52
+panda-ai-api-tester-v2/references/test-package-spec.md
+  h_e9ab747020676c 25-27,29-30,147-162,261-263,341,352-367,369,386,417-418,423
+panda-ai-api-tester-v2/scripts/composite_oracle_executor.py
+  h_e9ab747020676c 1-48
+panda-ai-api-tester-v2/scripts/db_oracle.py
+  h_e9ab747020676c 28,32,169-225,349,368
+panda-ai-api-tester-v2/scripts/environment_secret_store.py
+  h_e9ab747020676c 1-148
+panda-ai-api-tester-v2/scripts/evidence_schema.py
+  h_e9ab747020676c 1-75
+panda-ai-api-tester-v2/scripts/feasibility_plan.py
+  h_e9ab747020676c 70-71,75-88,90-91,93-102,137-140,173-175,195-196,205-212,216,221,231-233,285,288,303-305,308-310,312,314,357,389-392,394-397
+panda-ai-api-tester-v2/scripts/package_compiler.py
+  h_e9ab747020676c 155-157,178-179,181,198-210,241-242
+panda-ai-api-tester-v2/scripts/plan_compiler.py
+  h_e9ab747020676c 18-19,255-276,292-298,313-339,346-347,362-366,383-384,386
+panda-ai-api-tester-v2/scripts/redis_oracle.py
+  h_e9ab747020676c 1-322
+panda-ai-api-tester-v2/scripts/render_report.py
+  h_e9ab747020676c 15,132,136,164,209,246,248
+panda-ai-api-tester-v2/scripts/run_state.py
+  h_e9ab747020676c 100-103,115-117
+panda-ai-api-tester-v2/scripts/runner.py
+  h_e9ab747020676c 384,757,765,893,895,897,1011,1017,1032,1039,1066,1070,1136,1197-1198,1203-1204,1595,1613,1622,1624,1667-1668
+panda-ai-api-tester-v2/scripts/runtime_context.py
+  h_e9ab747020676c 8,12,40-41,50-61,85,199-229,303-331,539-544
+panda-ai-api-tester-v2/scripts/runtime_value_resolver.py
+  h_e9ab747020676c 1-230
+panda-ai-api-tester-v2/scripts/slice_executor.py
+  h_e9ab747020676c 14,258,260-272,276-282,289,291-299,314-324,328-329,335-346
+panda-ai-api-tester-v2/scripts/trusted_host.py
+  h_e9ab747020676c 4-8,16,21,108-112,120-121,156,179-192,232-239
+panda-ai-api-tester-v2/tests/test_db_oracle.py
+  h_e9ab747020676c 94,100-110,171
+panda-ai-api-tester-v2/tests/test_end_to_end_stub.py
+  h_e9ab747020676c 23,128-129,133-137,299-300,302,348-349,357,362-364,366,371-373
+panda-ai-api-tester-v2/tests/test_feasibility_plan.py
+  h_e9ab747020676c 102-103,109-119
+panda-ai-api-tester-v2/tests/test_multi_contract.py
+  h_e9ab747020676c 174-175,209-210
+panda-ai-api-tester-v2/tests/test_package_compiler.py
+  h_e9ab747020676c 192-213
+panda-ai-api-tester-v2/tests/test_plan_compiler.py
+  h_e9ab747020676c 91-114
+panda-ai-api-tester-v2/tests/test_redis_oracle.py
+  h_e9ab747020676c 1-130
+panda-ai-api-tester-v2/tests/test_report_evidence_embed.py
+  h_e9ab747020676c 1,20,23,45-48,60,72-75,86-88,105,110,112-113
+panda-ai-api-tester-v2/tests/test_runtime_context.py
+  h_e9ab747020676c 22,62-77,106-107,119-123,129,131,133-134,137-142,223-230,250
+panda-ai-api-tester-v2/tests/test_runtime_value_resolver.py
+  h_e9ab747020676c 1-243
+panda-ai-api-tester-v2/tests/test_trusted_host.py
+  h_e9ab747020676c 11,61-95,99,102,107,153,168,193-237,242
+panda-api-test-agent-v2/SKILL.md
+  h_e9ab747020676c 5,18-19,23,25,44,52,54-58,89,117,119,170-187,195-199,208-213,215,220-222,246-248,275,283,308-309
+panda-api-test-agent-v2/references/interaction-rules.md
+  h_e9ab747020676c 61-62,100,105,132,144,195-196,325,327-340,389,391,474
+panda-api-test-agent-v2/references/orchestration-rules.md
+  h_e9ab747020676c 5,7,11-13,16,24-31,33,41,69,83-84,87,89-92,96-107,148,169,199-218,237,269
+panda-api-test-agent-v2/references/requirement-report-spec.md
+  h_e9ab747020676c 175,190-227
+panda-api-test-agent-v2/scripts/execution_diagnostics.py
+  h_e9ab747020676c 17-18,63-72,75-85,145-188,231-242,245,250-252,291
+panda-api-test-agent-v2/scripts/render_requirement_report.py
+  h_e9ab747020676c 5,23,38-49,54,157-162,165-167,177-184,186-328,331-359,363-365,368-389,413
+panda-api-test-agent-v2/scripts/report_view_adapter.py
+  h_e9ab747020676c 1-485
+panda-api-test-agent-v2/scripts/requirement_aggregation.py
+  h_e9ab747020676c 130,158-159
+panda-api-test-agent-v2/scripts/requirement_validation.py
+  h_e9ab747020676c 36-38,86,88,90-96,99-106,108,117,120-128,147-148,150
+panda-api-test-agent-v2/scripts/review_adapter.py
+  h_e9ab747020676c 16,51-59,184-185,209-215
+panda-api-test-agent-v2/scripts/run_orchestrator.py
+  h_e9ab747020676c 181-209,225,243-246,279-287,298,327-330,360,412-452,467-474,477-478,481-500,505-513,529-556,629-649,656,667-675,688-689,751,853-854,861,864,961-964,985,1006,1013,1065
+panda-api-test-agent-v2/self-evals/order-natural-language-order-test.json
+  h_e9ab747020676c 24
+panda-api-test-agent-v2/tests/golden/requirement_report_sample.html
+  h_e9ab747020676c 1,7-20
+panda-api-test-agent-v2/tests/test_execution_diagnostics.py
+  h_e9ab747020676c 37,108-183
+panda-api-test-agent-v2/tests/test_report_view_adapter.py
+  h_e9ab747020676c 1-129
+panda-api-test-agent-v2/tests/test_requirement_report.py
+  h_e9ab747020676c 53,55,58,61-95
+panda-api-test-agent-v2/tests/test_requirement_validation.py
+  h_e9ab747020676c 13,17,19-21,29-30
+panda-api-test-agent-v2/tests/test_review_adapter.py
+  h_e9ab747020676c 36
+panda-api-test-agent-v2/tests/test_review_contract_closure.py
+  h_e9ab747020676c 273
+panda-api-test-agent-v2/tests/test_run_orchestrator.py
+  h_e9ab747020676c 20-21,48,51-71,79-84,104-182,211,226
+panda-api-test-agent-v2/tests/test_three_entry_unified_e2e.py
+  h_e9ab747020676c 37
+panda-l1-adapter-generator-v2/SKILL.md
+  h_e9ab747020676c 5,40,44-47,62,66,101,116,122,131,141,145
+panda-l1-adapter-generator-v2/references/config-template.md
+  h_e9ab747020676c 3,7,50,69,234-236,238,272,274,276
+panda-l1-adapter-generator-v2/references/scan-mapping.md
+  h_e9ab747020676c 29,63,66
+panda-l1-adapter-generator-v2/scripts/asset_validator.py
+  h_e9ab747020676c 25-29,42,47-109,124-130,138,143-163
+panda-l1-adapter-generator-v2/tests/test_asset_validator.py
+  h_e9ab747020676c 7,17-29,53,56-58,60,66-111
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "747c6eacc07ea1de29e4c724772c3915ac134f32",
+  "prompts": {},
+  "humans": {
+    "h_e9ab747020676c": {
+      "author": "罗豪宇 <zt000886@zt.com>"
+    }
+  }
+}
