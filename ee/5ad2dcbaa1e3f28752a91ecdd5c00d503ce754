@@ -1,0 +1,58 @@
+panda-ai-api-tester-v2/SKILL.md
+  h_e9ab747020676c 113-114,126
+panda-ai-api-tester-v2/references/case-design-rules.md
+  h_e9ab747020676c 30-33
+panda-ai-api-tester-v2/references/feasibility-plan-spec.md
+  h_e9ab747020676c 97-137
+panda-api-test-agent-v2/SKILL.md
+  h_e9ab747020676c 5,51-59,163,179-180,226-227,251-254,314-315
+panda-api-test-agent-v2/references/interaction-rules.md
+  h_e9ab747020676c 43,45,310,312-324,330,333,335-337
+panda-api-test-agent-v2/references/orchestration-rules.md
+  h_e9ab747020676c 31,52-62,85,88-93,97-105,260
+panda-api-test-agent-v2/references/requirement-report-spec.md
+  h_e9ab747020676c 7,92-93,106,195,225-227,252-254
+panda-api-test-agent-v2/scripts/entry_state.py
+  h_e9ab747020676c 37-44,94,96,98,106-107,153-158,198-207
+panda-api-test-agent-v2/scripts/execution_diagnostics.py
+  h_e9ab747020676c 22-69,418-421,479
+panda-api-test-agent-v2/scripts/protocol_contract.py
+  h_e9ab747020676c 29-40,43-51,222-336
+panda-api-test-agent-v2/scripts/render_requirement_report.py
+  h_e9ab747020676c 19,23-24,36-37,61-63,66,72,90-92,99-100,154-167,170-171,173-176,178-179,181,187-188,202-207,210-219,251-253,256,258,260-280,283-290
+panda-api-test-agent-v2/scripts/report_view_adapter.py
+  h_e9ab747020676c 9,11,50,53,131-157,164,171-173,177-224,253-255,258-290,353-361,365-368,414-415,438-441,444-449,464-475,478,485-488,504-505,508,559-565,634
+panda-api-test-agent-v2/scripts/requirement_aggregation.py
+  h_e9ab747020676c 252-270,273-275,278,329
+panda-api-test-agent-v2/scripts/run_orchestrator.py
+  h_e9ab747020676c 58-66,107,178,219-239,288,400-406,437-438
+panda-api-test-agent-v2/templates/requirement_report.html
+  h_e9ab747020676c 1-40
+panda-api-test-agent-v2/tests/golden/requirement_report_sample.html
+  h_e9ab747020676c 1-40
+panda-api-test-agent-v2/tests/test_execution_diagnostics.py
+  h_e9ab747020676c 11,41-67,135-155
+panda-api-test-agent-v2/tests/test_protocol_contract.py
+  h_e9ab747020676c 11-12,44-93
+panda-api-test-agent-v2/tests/test_report_view_adapter.py
+  h_e9ab747020676c 78,81-86,107-173,196-197
+panda-api-test-agent-v2/tests/test_requirement_report.py
+  h_e9ab747020676c 53,55-60,70-71,74-77,91,96,110-136,199-216,223-225,227
+panda-api-test-agent-v2/tests/test_review_contract_closure.py
+  h_e9ab747020676c 69-70,105-107,110,183-191
+panda-api-test-agent-v2/tests/test_unified_entry_state.py
+  h_e9ab747020676c 7,12,37-52
+panda-report-theme/report-base.css
+  h_e9ab747020676c 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ee5ad2dcbaa1e3f28752a91ecdd5c00d503ce754",
+  "prompts": {},
+  "humans": {
+    "h_e9ab747020676c": {
+      "author": "罗豪宇 <zt000886@zt.com>"
+    }
+  }
+}
