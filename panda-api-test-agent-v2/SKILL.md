@@ -2,7 +2,7 @@
 name: panda-api-test-agent-v2
 description: Easy/Fast 的新需求与新功能接口验证主 Agent。面向“验证这个需求/新功能”“测试单个接口质量”“调试这个接口”“检查环境”四类入口，先识别入口与最小目标；需求验收项分类为 direct/partial/none，并明确 none 无法在接口层验证；单接口默认执行传统接口质量测试。AI 生成测试设计后必须进入 pending_review，只有人工 approved 或 partially_approved 的具体用例才允许执行。需要进行需求/功能接口验收、单接口质量测试或接口调试时使用。
 agent_created: true
-version: 2.7.0
+version: 2.8.0
 ---
 
 # API Test Agent
@@ -48,14 +48,15 @@ version: 2.7.0
 - 单接口质量维度由 AI 根据接口语义、风险和事实判断适用性；Skill 提供默认检查清单，脚本只结构化 AI 已选维度并做审核、执行和安全校验。
 - 入口路由脚本只提供显式 metadata 路由或关键词候选；自然语言语义由 AI/Skill 决定，脚本歧义时不得代替 AI 猜测。
 
-1. 先自行读取、搜索、校验和交叉比对源码、Git 引用、部署配置、环境变量、已有文档和测试资产，再向用户追问。
-2. **数据源前置检查（判缺前强制）**：判测试数据缺口前，先查 `.panda-api-test-agent/data-sources.md` 登记与当前会话可用的造数类 MCP/连接器（如 datafactory），核对其支持环境与当前目标环境是否匹配、授权是否具备；匹配时**不得判为缺口**，改为把造数建模为声明 `object_ref`/`teardown`/数据标签的 fixture 写入任务纳入设计，与其他写用例同样过审核门。判缺必须登记 evidence（查过哪些来源、为什么不可构造）；未登记 evidence 的缺口视为诊断不完整，禁止凭"没查过"判缺。数据缺口只能生成 `execution_dependencies[kind=data,status=blocked]` 和 `planned_disposition=not_run`，不得删除候选用例、降低 AC 覆盖分母或把它改成 `none`。
-3. 用户提供的分支、Tag、Commit 或版本号异常时，先解析本地/远程引用、相近命名和提交对象；优先使用隔离 worktree 或只读 Git 对象检查，不覆盖当前工作区。
-4. 收到用户配置后，先逐项分类为 `stable_non_secret`、`persistent_secret`、`ephemeral_secret`、`runtime_non_secret` 或 `requirement_fact`：稳定非敏感项目事实交 L1 写入 `docs/test-config.md` 或 `docs/interface-profile/`；持久 Secret 进入 `.panda-api-test-agent/local/secrets/environments/<environment-id>.secret.json`；临时 Secret 仅进入活动 Run 的一次性 bridge 或宿主内存；临时非敏感运行值仅进入活动 Run/RuntimeContext；需求事实进入需求 context。不得因方便把 Secret 写入 canonical 配置、画像、TestPackage 或需求资产。
-5. 配置或画像缺失时，按当前测试目标生成最小配置和画像；判缺顺序固定为当前输入、canonical config（`docs/test-config.md` 与 `docs/interface-profile/`）、持久 Secret Store、活动 Run（含其已绑定 RuntimeContext/一次性 bridge 元数据）。仅当前四处均无可用值时才判缺并追问；已经写入且仍有效的值不得重复追问。缺口只阻断依赖该缺口的阶段或验收项，不得把局部缺口扩大为全局不可测。
-6. 普通非生产测试请求默认允许产生持久化副作用，包括业务记录、日志、轨迹、异步消息和测试数据；执行前记录环境、对象、范围、side_effect 和残留风险。
-7. 只有生产/疑似生产、删除或破坏性操作、批量大规模执行、真实外部动作、跨授权范围或无法判断目标对象时才强制确认或阻断。
-8. 不能安全自助解决时，只询问当前动作真正需要的最小信息，并说明该信息阻塞哪些测试项。
+1. 先自行读取、搜索、校验和交叉比对当前可用的事实来源，再向用户追问。具体来源由任务动态决定，不把平台、文件类型或单一访问方式写成固定前置；单一来源失败只证明该来源当前不可用，不等于事实不存在、阶段失败或任务终止。
+2. **证据驱动决策闭环（判缺与停止前强制）**：先定义当前阶段真正需要的最小事实，再把每项事实标为 `confirmed/candidate/insufficient/conflicted/unavailable/not_checked/not_applicable`。严格保持 `not_checked != unavailable`、`unavailable != absent`、`insufficient != none`。当前阶段事实不足，且下一取证动作可能改变完整设计范围、核心预期、安全判断或阻塞结论时，决策状态保持 `FACT_GATHERING` 并连续推进；判断下一动作是否继续时只问：**查到不同结果，是否会改变当前测试设计或当前结论**。会改变则继续；不会改变则停止；无法判断时只再检查一个最权威来源后作出判断。当前阶段事实已经足以形成完整 coverage obligations，并能为每项 obligation 形成明确、可诊断的候选用例时，必须停止扩展取证并进入设计；仍可获取但不会改变当前设计的 Mapper、SQL、前端、部署或外部证据只登记为补充事项，不得阻塞当前阶段。完整设计所需事实充分、但数据、凭证、fixture、Oracle 或 cleanup 等执行依赖未闭合时进入 `DEGRADED_READY`：完整候选设计不得缩减，未闭合依赖留到可行性阶段标记 `blocked`。只有无法形成完整设计、无法安全降级推进且不存在能改变当前结论的安全取证动作时才进入 `BLOCKED_USER`，并生成包含缺失事实、已查来源、耗尽动作、最小用户输入和恢复阶段的 `stop_proof`。阻塞必须绑定阶段、AC 或用例，禁止把局部来源失败扩大为全局不可测。
+3. **执行依赖证据闭环（判缺前强制）**：对数据、凭证、环境、fixture、Oracle 和 cleanup 依赖，先定义该依赖的最小必要事实，再检查与该事实直接相关的已登记来源，记录来源和证据状态。只有证据足以支持 `resolved`/`not_required` 时才停止并推进；仍存在可能改变状态、安全判断或批准范围的来源时继续定向取证；事实已足够或后续来源不会改变结论时必须停止。`not_checked` 不得直接判为 `blocked`；`unavailable` 不等于事实不存在；`resolved` 必须有 `evidence_refs`；`blocked` 必须绑定具体 case/dependency，写明缺失事实、已查来源、停止理由和最小下一步。判测试数据缺口前，必须查 `.panda-api-test-agent/data-sources.md` 登记与当前会话可用的造数类 MCP/连接器（如 datafactory），核对其支持环境与当前目标环境是否匹配、授权是否具备；匹配时**不得判为缺口**，改为把造数建模为声明 `object_ref`/`teardown`/数据标签的 fixture 写入任务纳入设计，与其他写用例同样过审核门。数据缺口只能生成 `execution_dependencies[kind=data,status=blocked]` 和 `planned_disposition=not_run`，不得删除候选用例、降低 AC 覆盖分母或把它改成 `none`。依赖从 blocked 变为 resolved 时只更新可行性，不改写设计语义；只有请求、断言、依赖语义或副作用变化才回到设计审核。
+4. 用户提供的分支、Tag、Commit 或版本号异常时，先解析本地/远程引用、相近命名和提交对象；优先使用隔离 worktree 或只读 Git 对象检查，不覆盖当前工作区。
+5. 收到用户配置后，先逐项分类为 `stable_non_secret`、`persistent_secret`、`ephemeral_secret`、`runtime_non_secret` 或 `requirement_fact`：稳定非敏感项目事实交 L1 写入 `docs/test-config.md` 或 `docs/interface-profile/`；持久 Secret 进入 `.panda-api-test-agent/local/secrets/environments/<environment-id>.secret.json`；临时 Secret 仅进入活动 Run 的一次性 bridge 或宿主内存；临时非敏感运行值仅进入活动 Run/RuntimeContext；需求事实进入需求 context。不得因方便把 Secret 写入 canonical 配置、画像、TestPackage 或需求资产。
+6. 配置或画像缺失时，按当前测试目标生成最小配置和画像；判缺顺序固定为当前输入、canonical config（`docs/test-config.md` 与 `docs/interface-profile/`）、持久 Secret Store、活动 Run（含其已绑定 RuntimeContext/一次性 bridge 元数据）。仅当前四处均无可用值时才判缺并追问；已经写入且仍有效的值不得重复追问。缺口只阻断依赖该缺口的阶段或验收项，不得把局部缺口扩大为全局不可测。
+7. 普通非生产测试请求默认允许产生持久化副作用，包括业务记录、日志、轨迹、异步消息和测试数据；执行前记录环境、对象、范围、side_effect 和残留风险。
+8. 只有生产/疑似生产、删除或破坏性操作、批量大规模执行、真实外部动作、跨授权范围或无法判断目标对象时才强制确认或阻断。
+9. 不能安全自助解决时，只询问当前动作真正需要的最小信息，并说明该信息阻塞哪些测试项。
 
 ## 何时使用
 
@@ -159,7 +160,7 @@ version: 2.7.0
 1. **识别入口**：区分需求/功能验证、单接口质量测试、接口调试和环境探测，并应用对应默认范围。
 2. **澄清目标**：测试请求不明确时，只澄清会影响设计、安全或结论的最小信息。
 3. **报告阶段**：每次调度前后说明当前处于准备期、设计期、待审核、执行期或结果期，并说明阶段变化原因。
-4. **主动追问**：扫描不到账号、权限、环境、业务语义、依赖关系或数据准备要求时，主动向用户追问，不静默猜测。
+4. **主动追问**：发现关键事实不足时先完成证据闭环；仍有安全且有价值的内部动作时自动继续，能受限推进时进入 `DEGRADED_READY`。只有形成 `stop_proof` 后才向用户追问最小必要输入，不静默猜测，也不因单一来源失败过早结束。
 5. **请求设计审核与风险确认**：按「测试设计人工审核门」执行，用 `record_review` 回写决策；高风险动作另行确认。
 6. **汇报进度**：同步设计、审核和执行进展；未获审核时明确说明“尚未发送请求”。
 7. **呈现结果**：给出基于事实的结论，包含通过、失败、跳过或未执行数量，以及报告位置和后续建议。
@@ -175,8 +176,8 @@ version: 2.7.0
 3. **收敛最小目标并判缺**：需求/功能验证确认需求基线与验收项；单接口质量测试默认采用传统质量维度；接口调试聚焦一个最小复现。每个待用绑定按“当前输入 → canonical config/画像 → `.panda-api-test-agent/local/secrets/environments/<environment-id>.secret.json` → 活动 Run”顺序检查。任一来源已有仍有效值即复用，禁止重复追问；只有四处均缺失时才形成缺口。简单 HTTP 场景不因缺少完整 `test-config`、全工程扫描、画像治理或无关 Oracle 阻塞；只在当前用例确实需要时按需补齐。
 4. **分类需求验收项**：仅对需求/功能入口，由 AI 结合需求文本、源码、契约、部署事实和可用 Oracle 判断每条 AC 为 `direct`、`partial` 或 `none`，记录理由、证据、可验证部分、不可验证部分和所需其他验证层。脚本只校验结果并禁止 `none` 生成伪接口用例；若 AI 尚未作出语义判断，保持 `pending_ai_decision`，不得猜测为 `direct`。
 5. **按需解析项目配置和适配层**：仅当当前获准用例需要长期配置、认证绑定、接口画像、DB/Redis/MQ/外部 Oracle 或复杂数据依赖时，才调度 `panda-l1-adapter-generator-v2` 按目标局部补齐。简单 HTTP 场景优先使用经审核的临时运行输入，不扫描无关项目资产、不预创建无关目录；数据缺口仍必须先记录已查数据源的 evidence。
-6. **检查需求上下文**：需求/功能入口读取或建立 `.panda-api-test-agent/requirements/<requirement-id>/context.json`，保存 PRD、实际代码基线、目标接口、分类后的验收项、专项数据和风险；单接口调试或质量测试无需为了运行级结论创建完整需求上下文。
-7. **生成深度测试设计**：调度 `panda-ai-api-tester-v2` 先从 AC、业务规则、参数契约、业务状态、角色/资源边界和副作用中生成 `coverage_obligations`，再把每项义务映射为具体候选用例与 AC 覆盖矩阵。完整设计不得退化为“每个维度一条用例”：必填参数逐字段展开，非法等价类逐分区展开，边界按参数覆盖边界内/点/外，鉴权按 missing/invalid/expired 等有事实依据的变体展开，权限按角色 × 资源归属展开，业务规则保留每个成功/失败分支，幂等验证对象唯一性和副作用次数，失败写入增加负向副作用 Oracle。每条用例必须有单一可诊断目标、具体请求差异、场景专属断言、`execution_dependencies` 和必要 Oracle；仅状态码、仅字段存在或无法被 Runner 消费的 mutation 不构成有效设计。候选设计必须保留所有需验证的失败分支、接口入口和 `partial/none` 外部证据任务；存在未映射的必需义务时状态必须为 `incomplete`，不得提交整体审核。设计完成后统一置为 `pending_review`，不得发送请求。
+6. **检查需求上下文**：需求/功能入口读取或建立 `.panda-api-test-agent/requirements/<requirement-id>/context.json`，保存 PRD、实际代码基线、目标接口、分类后的验收项、专项数据和风险；单接口调试或质量测试无需为了运行级结论创建完整需求上下文。需求设计阶段默认按 `PRD → Controller/路由 → 请求/响应 DTO → 核心规则类或主要 Service` 的顺序取得事实；当这些来源已足以形成完整 coverage obligations 和明确断言时必须停止继续扫描。只有来源冲突、业务规则无法形成明确断言、可能改变 coverage obligation，或可能改变副作用/安全等级时，才继续读取 Mapper、SQL、前端或部署配置。
+7. **生成深度测试设计**：调度 `panda-ai-api-tester-v2` 先从 AC、业务规则、参数契约、业务状态、角色/资源边界和副作用中生成 `coverage_obligations`，再把每项义务映射为具体候选用例与 AC 覆盖矩阵。完整候选设计回答“应该测什么”，可行性规划回答“现在能测什么”；不得为了提前确认真实数据、Token 有效性、fixture、DB/日志查询、cleanup 或外部证据而延迟已经事实充分的完整设计。完整设计不得退化为“每个维度一条用例”：必填参数逐字段展开，非法等价类逐分区展开，边界按参数覆盖边界内/点/外，鉴权按 missing/invalid/expired 等有事实依据的变体展开，权限按角色 × 资源归属展开，业务规则保留每个成功/失败分支，幂等验证对象唯一性和副作用次数，失败写入增加负向副作用 Oracle。每条用例必须有单一可诊断目标、具体请求差异、场景专属断言、`execution_dependencies` 和必要 Oracle；仅状态码、仅字段存在或无法被 Runner 消费的 mutation 不构成有效设计。候选设计必须保留所有需验证的失败分支、接口入口和 `partial/none` 外部证据任务；存在未映射的必需义务时状态必须为 `incomplete`，不得提交整体审核。设计完成后统一置为 `pending_review`，不得发送请求。
 8. **请求方案审核并回写**：先用 `compile_and_create_run` 建立 `pending_review` Run，审核对象必须包含覆盖义务摘要及 obligation→case 映射、完整候选范围、AC 覆盖矩阵、组合策略、Oracle 深度、当前拟执行范围、uncovered/blocked/not_applicable/waived 原因和外部证据缺口；将设计完整范围、`reviewed_case_ids` 与本轮 `execution_case_ids` 分开建模。收到决定后的首个动作必须是用 `record_review(run_dir, review)` 回写同一 Run，并确认 `review_recorded` 已生效。方案审核只推进到 feasibility，不直接执行。
 9. **计算可行性并请求执行授权**：按 `requested ∩ ready` 得到 `executable_case_ids`。显式 `execution_case_ids=[]` 保持零执行；0 executable 返回 `NO_READY_EXECUTION_CASES`/`NO_EXECUTION_CASES_REQUESTED` 并进入依赖解决，不得申请授权。存在 executable 时，展示环境、预计请求数、副作用摘要和具体用例，调用 `record_execution_authorization(run_dir, authorization)` 写回同一 Run。
 10. **执行分层门禁**：依次校验方案审核、feasibility、独立执行授权、配置状态、当前用例需要的画像字段、请求上限、数据标签和副作用；任一缺失都 fail-closed。只有 `authorized_case_ids` 内的业务用例及其 fixture/oracle/cleanup/reduce 支持任务可执行，支持任务不得带入其他未授权业务用例。
@@ -222,8 +223,8 @@ version: 2.7.0
 - 不以“已调度”替代“已完成”；执行结果必须以子 skill 的事实返回为准。
 - cleanup waiver 只能作为结构化例外：结果出现 `waived_cases` 时必须说明“已风险豁免”、残留对象和残余风险，不得表述为完整通过或清理成功。`write_attempt` 专指**已发起但结果未知或可能部分生效**的写请求（超时、连接中断、5xx、断言失败后发现部分写入），它不属于“默认允许的普通写入”，必须登记残留对象、禁止豁免、禁止自动重试。
 - 同一需求发生多次运行，或用户明确要求需求覆盖/发布结论时，交付一个需求级 `current` 报告：由 `build_requirement_manifest_for_runs()` 聚合多个 Run 生成唯一清单，`report_view_adapter.py` 只读清单、plan、result 与 evidence 构造派生展示模型，再由 `render_requirement_report.py` 确定性渲染。单次简单接口验证默认只交付运行级结果；运行级证据保持不可变，不要求用户自行拼结论。
-- 需求级 HTML 只使用合并版结构：总体结论 → 需求覆盖 → 需求涉及接口 → 场景 → 用例 → 检查项 → 原始请求/响应 → 问题、缺口、残留与下一步。旧版需求报告页面退出正式生成链路；历史 HTML 不修改。
-- 需求覆盖率必须同时给出验收项触达率、完整设计率、完整覆盖率和验收通过率，统一以 PRD 验收项总数为分母；另行展示候选用例数、当前可执行数、blocked/not_run 数、接口执行覆盖率和外部证据缺口，但不得用接口覆盖替代需求覆盖。环境、鉴权、造数和门禁不计入需求通过率。
+- 需求级 HTML 只使用合并版结构：总体结论 → 三类接口闭环能力 → 需求涉及接口 → 场景 → 用例 → 分层检查点 → 原始请求/响应 → 问题、缺口与残留。接口、场景、用例、检查点和报文均默认按需展开；旧版需求报告页面退出正式生成链路，历史 HTML 不修改。
+- 需求覆盖仅按 `direct`（接口可闭环）、`partial`（接口部分闭环）、`none`（接口不可闭环）三类展示；验收项事实和场景在分类内按需展开。首页只保留接口执行结果、需求验收结果和证据完整度，不展示触达率、完整覆盖率、接口执行覆盖等过程性统计。环境、鉴权、造数和门禁不计入需求通过率。
 - `execution_status=complete` 与 `verdict=passed` 必须分开。完整执行后发现问题属于“完整执行 + 失败”，部分证据不得标记通过。
 - 产品缺陷与测试缺口必须分开：缺账号、缺查询入口、未测 SLA、证据不足属于测试缺口；只有有效环境和数据下确认违反预期才属于产品缺陷。
 
@@ -247,9 +248,10 @@ version: 2.7.0
 7. 用 `build_requirement_manifest_for_runs([run_dir...], store_root=...)` 生成唯一清单：AC 事实、缺陷和残留风险来自 `requirement_aggregation` 的 `current` 投影，外部证据按 AC 合并后参与结论，不在主 Agent 侧另算一遍。单次运行需要清单时用 `build_requirement_manifest(run_dir)`。
 8. 登记或补充证据后必须调用 `refresh_requirement_report(...)` 重算并渲染唯一 `current` 报告；不要手工拼接 HTML，也不要只更新内存结论而不落盘。
 9. 报告器校验失败时不得交付正式报告。报告总体结论与 `release_recommendation` 必须来自同一组 AC 事实（PASS / BLOCKED / FAIL / INCONCLUSIVE），不得用单次运行 verdict 直接替代，也不得出现“结论 INCONCLUSIVE 但建议可发布”的组合。
-10. 报告展示模型只能重组现有事实：场景用于覆盖分类；用例承载具体测试条件；检查项来自结构化 assertion/Oracle；多个接口作为用例下的关联请求证据展示，不构造未记录的接口执行顺序。缺失映射、检查项或报文时明确降级，不得猜测或补造。
-11. 原始请求/响应按原样展示并默认折叠；失败、阻塞和未闭合场景默认展开。产品缺陷、验证缺口和残留风险必须分区展示。
-12. 对外默认只展示唯一需求级合并报告；按需提供运行级 result 和原始 evidence。
+10. 报告展示模型只能重组现有事实：场景用于覆盖分类；用例承载具体测试条件；转换脚本将 plan/evidence 中已有检查点统一为兼容的 `assertions[]/checkpoints[]`，并生成 `checkpoints_by_layer`。验证层固定为 HTTP、DB、Cache、MQ、日志和其他；优先采用证据显式层级，缺失时仅按已有类型和证据引用分类。`expected/actual/status/evidence_ref` 必须保留原始值，禁止从报文反推或补造。
+11. 兼容 `exchange/verification_exchange`、顶层 `request/response` 和 `steps[].request/response`，在每条已执行用例下按证据顺序展示完整原始请求与响应。转换脚本同时保留结构化 `request_data/response_data`、格式化文本和确定性 `curl`；页面只提供“复制为 cURL”一个操作按钮。不得截断、摘要替代、掩码、哈希或加密；只允许为安全嵌入 HTML 做可逆字符转义。所有层级默认折叠。
+12. 需求级 HTML 必须将完整标准 `report-base.css` 全量内联到 `<style>`，不得引用网络样式、本地绝对路径、相对 CSS 或 `<link rel="stylesheet">`。主题缺失或不完整时阻断正式报告生成，禁止用简化临时样式降级交付。
+13. 产品缺陷、验证缺口和残留风险必须分区展示。对外默认只展示唯一需求级合并报告；按需提供运行级 result 和原始 evidence。
 
 ## 典型流程示例
 
@@ -309,8 +311,8 @@ version: 2.7.0
 - `external_evidence.py`：`partial/none` 的外部验证层证据登记（append-only、禁止接口层伪造、无引用不得判通过）。
 - `execution_diagnostics.py`：门禁/编译/绑定异常的本地结构化自诊断。
 - `protocol_contract.py`：跨技能 artifact 契约、用户决策记录，以及 L1 事实（`scan_fact` / `scan_fact_decision`）的归一化与"必须已确认"校验。
-- `report_view_adapter.py`：只读 manifest、plan、result 与 evidence，派生需求覆盖、接口、场景、用例、检查项和原始报文展示模型；不写回 Run。
-- `render_requirement_report.py`：需求级确定性合并报告器；正式结构为“需求覆盖 → 需求接口 → 场景 → 用例 → 检查项 → 原始请求/响应”。
+- `report_view_adapter.py`：只读 manifest、plan、result 与 evidence，派生三类闭环覆盖、接口、场景、用例、分层检查点、结构化报文与 cURL 展示模型；不写回 Run。
+- `render_requirement_report.py`：需求级确定性合并报告器；正式结构为“三类接口闭环能力 → 需求接口 → 场景 → 用例 → 分层检查点 → 原始请求/响应”。
 
 规范：
 

@@ -55,7 +55,15 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+    temporary.replace(path)
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(content, encoding="utf-8", newline="\n")
     temporary.replace(path)
 
 
@@ -96,6 +104,7 @@ def compile_approved_design_to_package(
     are returned as structured diagnostics instead of being guessed.
     """
     compiler = _load("package_compiler")
+    feasibility_was_built = feasibility_plan is None
     diagnostics = diagnose_execution(
         design,
         execution_assets=execution_assets,
@@ -166,7 +175,7 @@ def compile_approved_design_to_package(
         "source_design_fingerprint": package["compilation"]["source_design_fingerprint"],
         "plan_fingerprint": package["review"]["plan_fingerprint"],
         "diagnosis": diagnostics,
-        "auto_recovery": ["feasibility_plan_built"] if feasibility_plan is not None else [],
+        "auto_recovery": ["feasibility_plan_built"] if feasibility_was_built else [],
     }
 
 
@@ -205,6 +214,27 @@ def _format_review_errors(errors: list[dict[str, Any]]) -> str:
             text += f" | hint: {hint}"
         parts.append(text)
     return " ; ".join(parts)
+
+
+def _require_host_review_provenance(review: dict[str, Any]) -> None:
+    """Require evidence that an executable review came from the host UI.
+
+    ``reviewer=user`` is user-provided data and therefore cannot establish
+    provenance. The host must attach both markers before an executable review
+    can enter or change a Run.
+    """
+    if not isinstance(review, dict):
+        raise OrchestrationError("REVIEW_SOURCE_REQUIRED: review must be a host interaction envelope")
+    if review.get("review_source") != "host_user_interaction":
+        raise OrchestrationError(
+            "REVIEW_SOURCE_REQUIRED: executable review must be submitted by the host interaction layer "
+            "with review_source=host_user_interaction"
+        )
+    interaction_id = review.get("interaction_id")
+    if not isinstance(interaction_id, str) or not interaction_id.strip():
+        raise OrchestrationError(
+            "REVIEW_INTERACTION_REQUIRED: executable review must include a non-empty host interaction_id"
+        )
 
 
 def _validate_unified_review(review: dict[str, Any], plan: dict[str, Any], case_ids: list[str]) -> dict[str, Any]:
@@ -255,6 +285,7 @@ def compile_and_create_run(intent: dict[str, Any], run_dir: str | Path, *, run_i
     if normalized_review.get("status") not in entry_state_mod.REVIEW_STATUSES:
         raise OrchestrationError("unsupported review status")
     if normalized_review.get("status") in entry_state_mod.EXECUTABLE_REVIEWS:
+        _require_host_review_provenance(review)
         normalized_review = _validate_unified_review(review, plan, case_ids)
     elif canonical["errors"]:
         raise OrchestrationError("; ".join(item["message"] for item in canonical["errors"]))
@@ -366,7 +397,13 @@ def record_execution_authorization(run_dir: str | Path, authorization: dict[str,
 
 
 def record_review(run_dir: str | Path, review: dict[str, Any]) -> dict[str, Any]:
-    """Persist a human review decision onto an existing run.
+    """Persist a host-originated human review decision onto an existing run.
+
+    The caller must pass a review envelope produced by the host interaction
+    layer.  A plain ``reviewer=user`` field is not sufficient evidence: the
+    write path requires ``review_source=host_user_interaction`` and a non-empty
+    ``interaction_id``.  This is intentionally the smallest fail-closed guard
+    against the Agent manufacturing its own approval JSON.
 
     This is the missing half of the human review gate: a run compiled as
     ``pending_review`` can be approved, partially approved or rejected in place
@@ -397,6 +434,8 @@ def record_review(run_dir: str | Path, review: dict[str, Any]) -> dict[str, Any]
         raise OrchestrationError("run plan candidate_cases and tasks diverged; blocked candidates must remain as not_run")
     canonical = _canonical_review(review, case_ids)
     status = canonical["status"]
+    if status in {"approved", "partially_approved"}:
+        _require_host_review_provenance(review)
     if status in {"rejected", "plan_only", "expired", "superseded"}:
         state_mod.update_state(root, {
             "review_status": status,

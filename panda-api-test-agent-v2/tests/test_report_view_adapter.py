@@ -75,10 +75,15 @@ class ReportViewAdapterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             manifest, _ = self._fixture(Path(temp))
             view = adapter.build_report_view(manifest, base_dir=temp)
-            self.assertEqual(view["report_view_version"], "1.0")
+            self.assertEqual(view["report_view_version"], "1.2")
             self.assertEqual([item["name"] for item in view["scenarios"]], ["AC-2 · 页面展示成功", "重复提交"])
             failed_case = next(case for scenario in view["scenarios"] for case in scenario["cases"] if case["id"] == "TC-1")
-            self.assertEqual(failed_case["assertions"][0]["actual"], 2)
+            execution_assertion = next(item for item in failed_case["assertions"] if item["source"] == "执行断言")
+            self.assertEqual(execution_assertion["actual"], 2)
+            self.assertEqual(execution_assertion["layer"], "http")
+            self.assertTrue(any(item["source"] == "计划检查点" for item in failed_case["assertions"]))
+            self.assertEqual(failed_case["checkpoints"], failed_case["assertions"])
+            self.assertIn(execution_assertion, failed_case["checkpoints_by_layer"]["http"])
             self.assertEqual(len(failed_case["exchanges"]), 2)
             self.assertEqual(failed_case["exchanges"][0]["path"], "/api/orders/123")
             self.assertEqual(view["summary"]["interface_total"], 2)
@@ -99,6 +104,73 @@ class ReportViewAdapterTests(unittest.TestCase):
                 self.assertIn(secret, body)
             failed_case = next(case for scenario in view["scenarios"] for case in scenario["cases"] if case["id"] == "TC-1")
             self.assertIn('"mobile": "13800138000"', failed_case["exchanges"][0]["request"])
+            self.assertEqual(failed_case["exchanges"][0]["request_data"]["body"]["mobile"], "13800138000")
+            self.assertIn("curl -X POST", failed_case["exchanges"][0]["curl"])
+            self.assertIn("Bearer should-not-leak", failed_case["exchanges"][0]["curl"])
+            self.assertIn("body-secret", failed_case["exchanges"][0]["curl"])
+
+    def test_steps_checks_and_full_messages_are_adapted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manifest, run = self._fixture(Path(temp))
+            huge = "X" * 6000
+            evidence = run / "evidence" / "case-TC-1.json"
+            evidence.write_text(json.dumps({
+                "case_id": "TC-1",
+                "status": "passed",
+                "checks": ["业务码为 200", {"name": "成功数量", "expected": 1, "actual": 1, "status": "passed"}],
+                "steps": [{
+                    "request": {"method": "POST", "url": "https://example.invalid/api/orders/123", "path": "/api/orders/123", "query": {}, "headers": {"Authorization": "Basic raw-secret"}, "json": {"payload": huge}, "requested_at": "2026-11-03T00:00:00+08:00"},
+                    "response": {"http_status": 200, "headers": {"X-Test": "ok"}, "body": {"message": huge}, "received_at": "2026-11-03T00:00:01+08:00"},
+                }],
+            }, ensure_ascii=False), encoding="utf-8")
+            view = adapter.build_report_view(manifest, base_dir=temp)
+            case = next(case for scenario in view["scenarios"] for case in scenario["cases"] if case["id"] == "TC-1")
+            self.assertTrue(any(item["source"] == "计划检查点" for item in case["assertions"]))
+            self.assertTrue(any(item["source"] == "执行检查说明" for item in case["assertions"]))
+            self.assertTrue(any(item["source"] == "执行检查点" for item in case["assertions"]))
+            self.assertEqual(len(case["exchanges"]), 1)
+            self.assertIn("Basic raw-secret", case["exchanges"][0]["request"])
+            self.assertIn(huge, case["exchanges"][0]["request"])
+            self.assertIn(huge, case["exchanges"][0]["response"])
+            self.assertNotIn("已截断", case["exchanges"][0]["request"])
+            self.assertIn("Basic raw-secret", case["exchanges"][0]["curl"])
+            self.assertIn("--data-raw", case["exchanges"][0]["curl"])
+
+    def test_checkpoint_layers_and_closure_groups_are_modelled(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manifest, run = self._fixture(Path(temp))
+            manifest["acceptance_items"][0]["interface_verifiability"] = "direct"
+            manifest["acceptance_items"][1]["interface_verifiability"] = "none"
+            evidence = run / "evidence" / "case-TC-1.json"
+            payload = json.loads(evidence.read_text(encoding="utf-8"))
+            payload["assertions"] = [
+                {"name": "HTTP 状态", "expected": 200, "actual": 200, "status": "passed", "validation_layer": "http"},
+                {"name": "订单行", "expected": 1, "actual": 1, "status": "passed", "validation_layer": "db"},
+                {"name": "Redis 值", "expected": "v", "actual": "v", "status": "passed", "validation_layer": "cache"},
+            ]
+            evidence.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            view = adapter.build_report_view(manifest, base_dir=temp)
+            case = next(case for scenario in view["scenarios"] for case in scenario["cases"] if case["id"] == "TC-1")
+            self.assertEqual([item["name"] for item in case["checkpoints_by_layer"]["db"]], ["订单行"])
+            self.assertEqual([item["name"] for item in case["checkpoints_by_layer"]["cache"]], ["Redis 值"])
+            groups = {group["id"]: group for group in view["coverage"]["groups"]}
+            self.assertEqual([item["id"] for item in groups["direct"]["items"]], ["AC-1"])
+            self.assertEqual([item["id"] for item in groups["none"]["items"]], ["AC-2"])
+
+    def test_top_level_request_response_are_adapted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            manifest, run = self._fixture(Path(temp))
+            evidence = run / "evidence" / "case-TC-1.json"
+            evidence.write_text(json.dumps({
+                "case_id": "TC-1", "checks": ["返回成功"],
+                "request": {"method": "POST", "url": "https://example.invalid/api/orders/123", "path": "/api/orders/123", "query": {}, "headers": {}, "json": {"id": 1}, "requested_at": "2026-11-03T00:00:00+08:00"},
+                "response": {"http_status": 200, "body": {"code": 200}},
+            }), encoding="utf-8")
+            view = adapter.build_report_view(manifest, base_dir=temp)
+            case = next(case for scenario in view["scenarios"] for case in scenario["cases"] if case["id"] == "TC-1")
+            self.assertEqual(len(case["exchanges"]), 1)
+            self.assertIn('"id": 1', case["exchanges"][0]["request"])
+            self.assertIn('"code": 200', case["exchanges"][0]["response"])
 
     def test_missing_run_files_degrade_without_mutating_manifest(self):
         manifest = {
@@ -121,7 +193,8 @@ class ReportViewAdapterTests(unittest.TestCase):
             (run / "evidence" / "case-TC-1.json").write_text(json.dumps(payload), encoding="utf-8")
             view = adapter.build_report_view(manifest, base_dir=temp)
             case = next(case for scenario in view["scenarios"] for case in scenario["cases"] if case["id"] == "TC-1")
-            self.assertEqual(case["evidence_note"], "无结构化检查项明细")
+            self.assertIsNone(case["evidence_note"])
+            self.assertTrue(any(item["source"] == "计划检查点" for item in case["assertions"]))
             self.assertEqual(case["exchanges"][0]["response"], "响应报文缺失")
 
 

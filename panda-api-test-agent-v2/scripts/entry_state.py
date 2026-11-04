@@ -34,6 +34,14 @@ REVIEW_STATUSES = {
 }
 EXECUTABLE_REVIEWS = {"approved", "partially_approved"}
 TERMINAL_NON_EXECUTABLE_REVIEWS = {"rejected", "plan_only", "expired", "superseded"}
+DECISION_STATES = {
+    "FACT_GATHERING",
+    "READY",
+    "DEGRADED_READY",
+    "PENDING_REVIEW",
+    "BLOCKED_USER",
+    "TERMINAL",
+}
 
 _ALLOWED_PHASE_TRANSITIONS = {
     "intent_received": {"preparing", "designing", "pending_review"},
@@ -83,11 +91,11 @@ def create_entry_state(*, run_id: str, entry_type: str, review: Any = None,
     requested = normalized_review.get("execution_case_ids") if "execution_case_ids" in normalized_review else normalized_review.get("requested_case_ids", [])
     requested = list(requested or [])
     if review_status == "pending_review":
-        phase, status, next_action = "pending_review", "awaiting_approval", "request_plan_review"
+        phase, status, next_action, decision_state = "pending_review", "awaiting_approval", "request_plan_review", "PENDING_REVIEW"
     elif review_status in EXECUTABLE_REVIEWS:
-        phase, status, next_action = "pending_review", "blocked", "request_execution_approval" if requested else "resolve_dependencies"
+        phase, status, next_action, decision_state = "pending_review", "blocked", "request_execution_approval" if requested else "resolve_dependencies", "READY"
     else:
-        phase, status, next_action = "pending_review", "blocked", "review_not_executable"
+        phase, status, next_action, decision_state = "pending_review", "blocked", "review_not_executable", "TERMINAL"
     state = {
         "schema_version": "2.1",
         "run_id": run_id,
@@ -95,6 +103,8 @@ def create_entry_state(*, run_id: str, entry_type: str, review: Any = None,
         "phase": phase,
         "status": status,
         "review_status": review_status,
+        "decision_state": decision_state,
+        "evidence_closure": None,
         "review_id": normalized_review.get("review_id"),
         "approved_case_ids": normalized_review.get("approved_case_ids", []),
         "reviewed_case_ids": normalized_review.get("reviewed_case_ids", normalized_review.get("approved_case_ids", [])),
@@ -140,6 +150,12 @@ def validate_state(state: dict[str, Any]) -> list[str]:
         errors.append("state.phase is invalid")
     if state.get("review_status") not in REVIEW_STATUSES:
         errors.append("state.review_status is invalid")
+    if state.get("decision_state") not in {None, *DECISION_STATES}:
+        errors.append("state.decision_state is invalid")
+    if state.get("decision_state") == "BLOCKED_USER":
+        closure = state.get("evidence_closure")
+        if not isinstance(closure, dict) or not isinstance(closure.get("stop_proof"), dict):
+            errors.append("BLOCKED_USER requires evidence_closure.stop_proof")
     if not isinstance(state.get("approved_case_ids"), list):
         errors.append("state.approved_case_ids must be a list")
     if state.get("phase") == "executing" and state.get("review_status") not in EXECUTABLE_REVIEWS:
@@ -178,6 +194,16 @@ def next_action_for_state(state: dict[str, Any]) -> str:
     if errors:
         raise EntryStateError("; ".join(errors))
     if state.get("phase") == "reported" or state.get("status") in {"reported", "reduced"}:
+        return "complete"
+    decision_state = state.get("decision_state")
+    closure = state.get("evidence_closure") if isinstance(state.get("evidence_closure"), dict) else {}
+    if decision_state == "FACT_GATHERING":
+        return str(closure.get("next_action") or "continue_evidence_gathering")
+    if decision_state == "DEGRADED_READY":
+        return str(closure.get("next_action") or "advance_with_declared_limits")
+    if decision_state == "BLOCKED_USER":
+        return "request_minimum_user_input"
+    if decision_state == "TERMINAL" and state.get("review_status") not in TERMINAL_NON_EXECUTABLE_REVIEWS:
         return "complete"
     if state.get("review_status") == "pending_review":
         return "request_plan_review"

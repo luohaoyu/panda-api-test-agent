@@ -8,7 +8,7 @@ L2_SCRIPTS = Path(__file__).resolve().parents[2] / "panda-ai-api-tester-v2" / "s
 sys.path.insert(0, str(L2_SCRIPTS))
 sys.path.insert(0, str(SCRIPTS))
 
-from execution_diagnostics import diagnose_design, format_diagnosis  # noqa: E402
+from execution_diagnostics import diagnose_design, diagnose_evidence_closure, format_diagnosis  # noqa: E402
 from package_compiler import calculate_design_fingerprint  # noqa: E402
 
 
@@ -37,6 +37,33 @@ class ExecutionDiagnosticsTests(unittest.TestCase):
             "reviewed_fields": {"C1": ["case", "request", "assertions", "data_dependencies", "side_effects"]},
         }
         return design
+
+    def test_evidence_diagnosis_does_not_block_on_single_source_failure(self):
+        diagnosis = diagnose_evidence_closure(
+            [{
+                "fact_id": "FACT-REQ",
+                "status": "unavailable",
+                "checked_sources": [{"source_id": "provided-url", "status": "unavailable"}],
+            }],
+            candidate_actions=[{"action": "inspect_existing_assets", "available": True, "safe": True, "valuable": True}],
+        )
+        self.assertEqual(diagnosis["decision_state"], "FACT_GATHERING")
+        self.assertEqual(diagnosis["status"], "recoverable")
+        self.assertEqual(diagnosis["issues"], [])
+
+    def test_evidence_diagnosis_requires_stop_proof_before_user_block(self):
+        diagnosis = diagnose_evidence_closure(
+            [{
+                "fact_id": "FACT-REQ",
+                "status": "unavailable",
+                "checked_sources": [{"source_id": "provided-url", "status": "unavailable"}],
+                "user_input": {"kind": "requirement_fact"},
+                "resume_from": "designing",
+            }],
+        )
+        self.assertEqual(diagnosis["decision_state"], "BLOCKED_USER")
+        self.assertIsInstance(diagnosis["stop_proof"], dict)
+        self.assertEqual(diagnosis["issues"][0]["code"], "EVIDENCE_STOP_PROOF_COMPLETE")
 
     def test_pending_review_is_structured_and_not_silenced(self):
         design = self._design()
@@ -104,6 +131,27 @@ class ExecutionDiagnosticsTests(unittest.TestCase):
         ]
         diagnosis = diagnose_design(design, execution_assets=assets)
         self.assertIn("DESIGN_BLOCKING_GAPS_PRESENT", {item["code"] for item in diagnosis["issues"]})
+
+    def test_dependency_outside_requested_scope_is_deferred(self):
+        design = self._design()
+        design["cases"].append({
+            "case_id": "C2",
+            "request": {"method": "GET", "path": "/blocked"},
+            "execution_dependencies": [{"dependency_id": "D2", "kind": "data", "status": "blocked", "evidence": ["checked"]}],
+        })
+        design["review"].update({
+            "approved_case_ids": ["C1", "C2"],
+            "execution_case_ids": ["C1"],
+            "reviewed_fields": {"C1": ["case"], "C2": ["case"]},
+        })
+        design["design_fingerprint"] = calculate_design_fingerprint(design)
+        design["review"]["design_fingerprint"] = design["design_fingerprint"]
+        diagnosis = diagnose_design(
+            design,
+            execution_assets={field: {} for field in ("project", "test_config", "contract", "environment", "risk")},
+            feasibility_plan={},
+        )
+        self.assertNotIn("DATA_DEPENDENCY_BLOCKED", {item["code"] for item in diagnosis["issues"]})
 
     def test_blocked_data_dependency_is_not_scoped_out_by_diagnosis(self):
         design = self._design()

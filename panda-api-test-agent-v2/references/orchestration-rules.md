@@ -28,7 +28,7 @@
 5. 所有实际使用资源必须来自同一环境节点，禁止 HTTP/Token/DB/Redis/MQ 跨环境拼接。
 6. 接口画像按需检查：路由/方法、请求参数、响应/业务码、鉴权、副作用和当前用例需要的 Oracle 足够即可执行；完整 Owner、双指纹、清理和外部边界在对应正式 EXECUTE/PROMOTE 或资产沉淀时补齐。
 7. 需求 context 缺失时，先由主 Agent 根据 PRD、用户输入和实际采用基线创建最小上下文；不得因无关 AC 或未使用资源缺失阻断当前可执行 AC。
-8. 数据源前置检查：判测试数据缺口前，先查 `data-sources.md` 登记与当前会话可用的造数类 MCP/连接器（如 datafactory），核对支持环境与授权；存在且匹配当前目标环境时不判缺，改判为『需造数动作设计』，把造数建模为声明 `object_ref`/`teardown`/数据标签的 fixture 写入任务纳入设计。判缺必须登记 evidence（查过的来源与不可构造原因），未登记 evidence 的缺口视为诊断不完整。数据缺口只能影响本轮 `execution_case_ids`，必须保留候选设计、审核范围和覆盖分母，并将受影响用例标记 `planned_disposition=not_run`。
+8. 执行依赖证据闭环：对每个 data、credential、environment、fixture、oracle、cleanup 依赖，先定义最小必要事实，再检查直接相关来源，记录事实状态和 evidence_refs，并判定 `resolved|not_required|blocked`。`not_checked` 不得直接判为 `blocked`；`unavailable` 不等于事实不存在；`resolved` 必须有证据引用；`blocked` 必须绑定具体 case/dependency，记录缺失事实、已查来源、停止理由和最小 next_action。依赖证据已经足以判定，或后续来源不会改变状态、安全判断或批准范围时，必须停止无关取证；仅当新动作可能改变这些结论时继续。判测试数据缺口前，先查 `data-sources.md` 登记与当前会话可用的造数类 MCP/连接器（如 datafactory），核对支持环境与授权；存在且匹配当前目标环境时不判缺，改判为『需造数动作设计』，把造数建模为声明 `object_ref`/`teardown`/数据标签的 fixture 写入任务纳入设计。判缺必须登记 evidence（查过的来源与不可构造原因），未登记 evidence 的缺口视为诊断不完整。数据缺口只能影响本轮 `execution_case_ids`，必须保留候选设计、审核范围和覆盖分母，并将受影响用例标记 `planned_disposition=not_run`。依赖从 blocked 变为 resolved 时只更新 feasibility，不改写设计语义；只有请求、断言、依赖语义或副作用变化才回到设计审核。
 
 配置、画像或运行 binding 判缺前，必须按“当前输入 → canonical `docs/test-config.md` / `docs/interface-profile/` → 目标环境持久 Secret Store → 活动 Run”检查并记录来源命中情况；任一来源已有仍有效值即复用，不得重复追问。四处均无值时，缺口才可映射到具体 `stage`、AC 或 case。只阻断依赖该缺口的项，其余项继续执行。临时 URL/Token 仅运行时注入，不写入配置。旧格式仍不能被消费或伪装为长期 Schema 2.1；只有当前获准用例确实依赖配置时，才由 L1 依据可验证证据生成独立、可审计的临时 Schema 2.1 运行配置，不修改旧文件；正式资产由 L1 按需补齐。
 
@@ -48,6 +48,17 @@
 - **运行状态**（L2 `run_state` 持久化）：`status`（`ready`/`awaiting_approval`/`blocked`/`interrupted`/`reduced`/`reported`）、`review_status`、`completed_slices`、`pending_cleanup` 等实际落盘字段。
 
 两者关系：`phase` 只描述流程位置，执行许可由方案审核、feasibility 与独立执行授权共同决定。`review_status=approved|partially_approved` 只允许推进到可行性计算；新 TestPackage 只有在 `execution_authorization.status=approved|partially_approved`、授权范围非空且指纹匹配时才能进入 `executing`。缺方案审核记录为 `slice_blocked_unreviewed`，缺执行授权记录为 `slice_blocked_execution_authorization`。不存在“phase 到了 executing”或“方案已批”就能发送请求的情况。
+
+在上述流程状态之外，入口状态增加独立的**决策状态**，不得与审核或运行许可混用：
+
+- `FACT_GATHERING`：当前阶段事实仍不足，且存在安全、只读、可逆并可能改变完整设计、核心预期、安全判断或阻塞结论的取证动作，必须连续推进，不得向用户转嫁；
+- `READY`：当前阶段最小事实闭合，可以推进到下一流程阶段，但不代表具备执行许可；事实充分后必须停止扩展取证；
+- `DEGRADED_READY`：完整候选设计所需事实已闭合，但部分数据、凭证、fixture、Oracle、cleanup 或外部证据等执行依赖未闭合；候选设计不得缩减，未闭合部分进入可行性或证据闭环，不得把降级推进写成需求通过；
+- `PENDING_REVIEW`：测试设计已形成，等待唯一的人工方案审核门；
+- `BLOCKED_USER`：所有安全下一动作已耗尽，且已生成 `stop_proof`，只等待最小外部输入；
+- `TERMINAL`：流程已完成、拒绝、取消或不可恢复结束。
+
+每项关键事实使用 `confirmed/candidate/insufficient/conflicted/unavailable/not_checked/not_applicable`。`not_checked` 不得汇报成“没有”，`unavailable` 只描述对应来源，`insufficient` 不得被升级为 `none`。主 Agent 只在当前 Run/context 中保存影响决策的证据包络和来源引用，不复制 L1 事实账本，不保存完整思维过程。
 
 `api_debug` 默认只生成一个最小复现用例，不自动扩展为质量维度；`requirement_validation` 的 `none` 验收项不生成 API 用例。
 
@@ -71,11 +82,26 @@
 
 ## 4. 阶段与调度
 
-所有入口先进入以下流程：
+所有入口先执行证据驱动决策循环，再进入既有测试生命周期：
 
 ```text
+识别当前目标与阶段最小事实
+  -> 登记事实状态与来源引用
+  -> 选择安全且有价值的下一动作
+  -> FACT_GATHERING / READY / DEGRADED_READY / BLOCKED_USER
+  -> 复评
+
 intent_received -> preparing -> designing -> pending_review -(plan_review)-> feasibility -> pending_execution_approval -(execution_approval)-> executing -> reducing -> reported
 ```
+
+决策循环的不变量：
+
+1. 单一来源失败不得直接产生全局终止；先评估该事实是否可由其他当前授权来源、已有资产或确定性动作补齐。
+2. 关键事实仍为 `not_checked` 时不得形成停止证明；仅当候选动作可能改变完整设计、核心预期、安全判断或阻塞结论时保持 `FACT_GATHERING`。查到不同结果不会改变当前设计或结论时必须停止；无法判断时只再检查一个最权威来源。
+3. 当前事实已足以形成完整 coverage obligations 和明确、可诊断的候选用例时，必须停止扩展取证并进入设计。数据、凭证、fixture、运行时 Oracle、cleanup 或外部证据未闭合时进入 `DEGRADED_READY`，完整候选设计不得缩减，未闭合项进入可行性或证据闭环。
+4. 只有无法形成完整设计、无法安全降级推进且不存在能改变当前结论的安全下一动作时才进入 `BLOCKED_USER`。`stop_proof` 至少包含缺失事实、已查来源、不可用/耗尽动作、最小用户输入、阻塞作用域和恢复阶段。
+5. 事实补充但设计行为未变化时继续原 Run；用例、请求、断言、依赖、副作用、环境或执行范围变化时仍按原规则更新指纹并重新审核。
+6. 决策状态只决定“是否还能自主推进”，不能批准设计、授权执行或放行高风险动作。
 
 `plan_review` 通过后先计算 `executable = requested ∩ ready`，不能直接进入 `executing`；`rejected`/`plan_only`/`expired`/`superseded` 停在原地并输出 `review_not_executable`。0 executable 进入依赖解决且实际请求数固定为 0；非空 executable 才能申请独立 `execution_approval`。
 
@@ -231,7 +257,7 @@ AC 的 verdict 只由该 AC scope 内用例的证据状态决定，并要求每�
 
 每次反馈必须回答：现在能不能跑、卡在哪里、用户要做什么。最多呈现 3 个当前硬阻塞，并收敛为一个决策点。不得把配置生成、PROBE 成功、Mock、skip、collect 或部分执行称为需求通过。
 
-任何阻断都必须先完成本地自诊断，再对外反馈；禁止只报“门禁不通过”、只抛原始异常或等待用户追问。诊断结果至少包含：
+任何阻断都必须先完成本地自诊断，再对外反馈；禁止只报“门禁不通过”、只抛原始异常或等待用户追问。准备期/设计期先调用通用证据闭环评估：若仍有安全动作则返回 `FACT_GATHERING`，若可受限推进则返回 `DEGRADED_READY`，只有生成有效 `stop_proof` 才能返回 `BLOCKED_USER`。执行期继续使用原门禁诊断，二者不得互相替代。诊断结果至少包含：
 
 - `code`：稳定的机器可读原因码；
 - `category`：`skill_state_sync`、`skill_integrity`、`skill_integration`、`review_gate`、`execution_binding`、`runtime_precondition` 或 `execution_environment`；

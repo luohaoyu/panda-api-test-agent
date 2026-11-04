@@ -94,6 +94,47 @@ REQUIREMENT
 - `not_required`：经设计判断当前用例不需要。
 - `blocked`：尚缺事实、数据或凭证。规划继续完成；只有人工审核把该用例纳入批准范围后，它才会使最终门禁失败并阻止 Package Build。
 
+### 依赖证据闭环（规划阶段）
+
+执行依赖不得只通过一次静态赋值判断。对每个 `execution_dependencies`，按以下最小闭环处理：
+
+```text
+定义依赖及其最小必要事实
+→ 检查与该依赖直接相关的已登记来源
+→ 记录事实状态和 evidence_refs
+→ 判断证据是否足以 resolved / not_required
+→ 不足但仍有能改变判定的来源：继续定向检查
+→ 已能判定或后续检查不会改变结论：停止
+→ 无法满足时记录 blocked、known_gap、checked_sources 和 next_action
+```
+
+依赖项至少保留以下字段；不适用字段使用 `[]` 或 `null`，不得省略后让下游猜测：
+
+```json
+{
+  "dependency_id": "DATA-WAYBILL-001",
+  "kind": "data",
+  "status": "resolved|not_required|blocked",
+  "required_facts": ["对象状态", "环境归属", "唯一标识"],
+  "checked_sources": ["data-sources.md", "active-run-fixtures"],
+  "evidence_refs": ["fact:data-source:001"],
+  "known_gap": null,
+  "next_action": null,
+  "stop_reason": "sufficient|blocked_after_relevant_checks|not_required"
+}
+```
+
+统一遵守以下边界：
+
+1. `not_checked` 不得直接转换为 `blocked`；必须说明已检查的相关来源，或明确该来源与当前依赖无关。
+2. `unavailable` 只表示对应来源不可用，不表示依赖事实不存在；仍可使用其他已授权来源，或将其记录为 `known_gap`。
+3. `resolved` 必须有至少一个 `evidence_refs`，且证据能直接支持该依赖的最小必要事实；不能只凭“已检查”或源码结构推断测试环境对象已存在。
+4. `blocked` 必须绑定具体 `case_id`/`dependency_id`，说明缺失事实、已检查来源、不会继续检查的理由和最小 `next_action`；不得扩大为无关用例或整个需求阻塞。
+5. 如果存在已登记且匹配目标环境的造数/fixture 来源，不得直接判数据缺口；应把造数作为待审核的 fixture 任务继续规划。
+6. 依赖事实已经足以判定状态后，必须停止无关扩展；只有下一来源可能改变 `status`、安全判断或批准范围时才继续检查。
+
+依赖从 `blocked` 变为 `resolved` 时，只更新可行性快照及其指纹，不能因此改写候选用例、coverage obligations 或设计语义；请求、断言、依赖语义或副作用发生变化时，才回到 CASE DESIGN。
+
 ## Coverage map
 
 `coverage_map` 同时保留候选覆盖和当前可执行覆盖：

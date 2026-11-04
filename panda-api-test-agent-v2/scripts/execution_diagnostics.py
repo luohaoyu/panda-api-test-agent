@@ -19,6 +19,54 @@ CONFIG_GAP_KINDS = {"config", "profile", "secret", "runtime_binding"}
 CONFIG_SOURCE_ORDER = ("current_input", "canonical_config", "persistent_secret_store", "active_run")
 
 
+def diagnose_evidence_closure(
+    facts: list[dict[str, Any]],
+    *,
+    candidate_actions: list[dict[str, Any]] | None = None,
+    degraded_scope: list[str] | None = None,
+) -> dict[str, Any]:
+    """Diagnose preparation/design evidence without platform-specific rules.
+
+    A single unavailable source can only mark the corresponding fact unresolved.
+    User input is requested only when no unchecked fact or safe valuable action
+    remains and the protocol evaluator can produce a stop proof.
+    """
+    from protocol_contract import evaluate_evidence_closure
+
+    closure = evaluate_evidence_closure(
+        facts,
+        candidate_actions=candidate_actions,
+        degraded_scope=degraded_scope,
+    )
+    state = closure["decision_state"]
+    issue = None
+    if state == "BLOCKED_USER":
+        proof = closure.get("stop_proof") or {}
+        issue = _issue(
+            "EVIDENCE_STOP_PROOF_COMPLETE",
+            category="evidence_closure",
+            owner="user_or_external_owner",
+            severity="high",
+            recoverable=False,
+            evidence="missing facts: " + ", ".join(proof.get("missing_fact_ids") or []),
+            impact="only the scopes declared by the unresolved facts remain blocked",
+            next_action="request only the minimum_user_inputs recorded in stop_proof, then resume from the recorded stage",
+        )
+    return {
+        **closure,
+        "status": {
+            "FACT_GATHERING": "recoverable",
+            "READY": "ready",
+            "DEGRADED_READY": "degraded_ready",
+            "PENDING_REVIEW": "pending_review",
+            "BLOCKED_USER": "blocked",
+            "TERMINAL": "terminal",
+        }[state],
+        "issues": [issue] if issue else [],
+        "execution_allowed": False,
+    }
+
+
 def _issue(
     code: str,
     *,
@@ -367,7 +415,10 @@ def diagnose_design(
                 next_action="record reviewed fields per approved case and retain the review ID",
             ))
 
-        issues.extend(_execution_dependency_issues(design, scope))
+        # Review integrity is checked against the full approved scope, while
+        # execution feasibility is limited to the presence-sensitive requested
+        # subset. A blocked dependency outside this run is deferred, not global.
+        issues.extend(_execution_dependency_issues(design, requested))
 
     declared = design.get("design_fingerprint") or design.get("source_design_fingerprint")
     reviewed = review.get("design_fingerprint") or review.get("source_design_fingerprint")
@@ -425,7 +476,7 @@ def diagnose_design(
                 next_action="bind only the current target's project, test_config, contract, environment and risk assets; do not use legacy config as a fallback",
             ))
 
-        blocking_gaps, deferred_gaps = _split_blocking_gaps(design, scope)
+        blocking_gaps, deferred_gaps = _split_blocking_gaps(design, requested)
         if blocking_gaps:
             issues.append(_issue(
                 "DESIGN_BLOCKING_GAPS_PRESENT",

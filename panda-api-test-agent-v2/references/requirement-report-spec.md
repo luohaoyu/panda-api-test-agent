@@ -4,7 +4,7 @@
 
 需求级验收报告聚合同一需求的多次 `PROBE`、`EXECUTE` 和只读 Oracle 运行。运行级 `result.json`、HTML 和 evidence 保持不可变；需求报告只引用它们，不复制或覆盖原始证据。
 
-正式需求报告必须由 `scripts/render_requirement_report.py` 从结构化 `requirement-report.json` 确定性生成，不得由 Agent 自由拼接 HTML。
+正式需求报告必须由 `scripts/render_requirement_report.py` 从结构化 `requirement-report.json` 确定性生成，不得由 Agent 自由拼接 HTML。Python 只构建报告 payload、读取唯一 `templates/requirement_report.html` 模板并内联共享 CSS 与安全 JSON；页面结构由模板中的原生 JavaScript 从 `application/json` 数据渲染，最终产物仍为可离线打开的单文件 HTML。
 
 清单来源固定为 `scripts/run_orchestrator.py` 的两个投影函数，不允许手工编写：
 
@@ -89,6 +89,8 @@
 
 分类定义：
 
+分类前置状态为 `pending_ai_decision`，可细分原因 `pending_evidence`：当前证据不足以做 `direct/partial/none` 语义判断。它不是正式 `interface_verifiability` 枚举，不得进入可执行范围或被报告器当成 `none`；继续取证、降级保留或形成 `stop_proof` 后，才能完成正式分类。需求材料或单一来源不可访问只允许产生 `pending_evidence`，不能证明接口层不可验证。
+
 - `direct`：验收目标及必需 Oracle 可由接口请求、响应和可用后端证据完整验证。
 - `partial`：接口层只能验证验收目标的一部分；必须同时写明可验证与不可验证部分。
 - `none`：接口请求/响应和后端 Oracle 无法验证该验收目标；报告必须显示“接口层不可验证”，不得为凑覆盖率生成伪接口用例。
@@ -101,6 +103,7 @@
 - `none` 不得由接口运行判定 `passed` 或 `failed`；保持 `not_run`/`inconclusive`，并提供建议验证层。
 - 部分证据不得写为通过；环境门禁、鉴权、造数和 collect 不计入验收项通过。
 - 未发送业务请求或无运行证据的项必须为 `not_run`。
+- `pending_evidence` 属于设计前测试缺口，只能形成 `not_run/inconclusive` 或阻塞说明；不得计为 `none`、产品失败或接口层覆盖。
 
 ## 5. 外部验证层证据登记
 
@@ -189,7 +192,7 @@ AC 结论矩阵：
 
 ## 10. 报告信息架构
 
-正式 HTML 使用 `panda-requirement-report@4.0.0` 的唯一合并版信息架构。旧版“验收项卡片 + 独立问题区 + 证据索引”页面退出正式生成链路，不再继续兼容其视觉结构；历史 HTML 与运行证据仍保持不可变。
+正式 HTML 使用 `panda-requirement-report@6.0.0` 的唯一合并版信息架构。旧版“验收项卡片 + 独立问题区 + 证据索引”页面退出正式生成链路，不再继续兼容其视觉结构；历史 HTML 与运行证据仍保持不可变。
 
 固定层级为：
 
@@ -219,9 +222,9 @@ run_index / unmapped_evidence
 
 - 场景优先使用 `scenario_refs`，其次使用 `scenario_type`、质量维度、业务规则或 AC；仍无法关联时归入“未分类场景”。
 - 用例来自 plan 中的 `task_id/case_id`，状态与证据来自 result 和 evidence。
-- 检查项来自结构化 assertion/Oracle；没有明细时显示“无结构化检查项明细”，不得根据响应重新发明断言。
-- 多个接口作为同一用例的关联请求证据展示，不构造 `Execution Step`，不表达未被事实记录的业务顺序。
-- 原始报文缺失、损坏、截断或无法关联时必须明确标注，并进入降级索引；不得伪造内容或参与通过率计算。
+- 检查点在报告视图模型中统一为 `checkpoints[]`，保留兼容字段 `assertions[]`；每项必须保留 `expected`、`actual`、`status`、`evidence_ref` 原始值，并增加 `layer`。验证层固定为 `http`、`db`、`cache`、`mq`、`log`、`other`；优先使用证据显式 `validation_layer/layer/oracle_layer`，仅在缺失时按既有类型与证据引用分类，不得推导或补造 expected/actual。HTML 只按层展示原始值，不展示转换过程说明。
+- 多个接口作为同一用例的关联请求证据展示，不构造 `Execution Step`，不表达未被事实记录的业务顺序。兼容 `exchange` / `verification_exchange`、顶层 `request/response` 和 `steps[].request/response` 三类证据结构。视图模型同时保留完整 `request_data/response_data` 和格式化文本，并由转换脚本确定性生成 `curl`；页面只提供“复制为 cURL”一个报文操作按钮。
+- 原始报文缺失、损坏或无法关联时必须明确标注，并进入降级索引；不得伪造内容或参与通过率计算。正式需求报告必须展示 evidence 中的完整报文，不得截断、摘要替代、掩码、哈希或加密；只允许为安全嵌入 HTML 做可逆字符转义。
 - 接口执行覆盖率以 plan 中唯一 HTTP 接口为分母，以实际存在 exchange 证据的计划接口为分子；证据中额外出现的复核接口可以展示，但不扩张分母。
 
 ## 11. 确定性契约
@@ -246,7 +249,9 @@ run_index / unmapped_evidence
 
 模板只允许存在一份权威实现。其他入口若仍需保留，必须降级为转发到该实现的适配器，不得内联复制模板或样式。
 
-设计令牌同受单一来源约束：全部报告渲染器从 `panda-report-theme/report-base.css` 加载共享令牌与基础样式（构建时内联，保证离线可打开），禁止在模板中重新定义 `:root` 令牌。主题文件缺失时渲染器必须报错拒绝渲染，不得静默降级；产物 footer 必须记录 `template_id@template_version` 与 `base-css:<sha256 前 12 位>`。可用 `PANDA_REPORT_THEME` 环境变量覆盖主题文件路径。令牌变更等价于模板变更，必须递增引用方 `template_version`。
+需求覆盖在视图模型中固定提供 `coverage.groups`，顺序为 `direct`（接口可闭环）、`partial`（接口部分闭环）、`none`（接口不可闭环）；HTML 默认仅显示这三类，点击后查看验收项和场景。接口、场景、用例、检查点和报文均默认按需展开。首页只保留接口执行结果、需求验收结果和证据完整度，不展示触达率、完整覆盖率、接口执行覆盖、过程性结论解释或优先下一步。
+
+设计令牌同受单一来源约束：全部报告渲染器从 `panda-report-theme/report-base.css` 加载共享令牌与基础样式（构建时全量内联进单文件 HTML，保证离线可打开），禁止在模板中重新定义共享 `:root` 令牌。正式 HTML 禁止 `<link rel="stylesheet">`、网络样式、本地绝对路径或相对 CSS 依赖。主题文件缺失或不完整时渲染器必须报错拒绝渲染，不得静默降级；产物 footer 必须记录 `template_id@template_version` 与 `base-css:<sha256 前 12 位>`。可用 `PANDA_REPORT_THEME` 环境变量指定完整标准主题文件，但不得接受简化临时主题。令牌变更等价于模板变更，必须递增引用方 `template_version`。
 
 `generated_at` 由 manifest 维护方在首次生成时写入（执行时刻一次定稿），此后不再修改——它属于 manifest 内容身份的一部分，不是渲染期信息。重渲染只能复用该值。
 

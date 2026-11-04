@@ -6,10 +6,9 @@ import json
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
-REPORT_VIEW_VERSION = "1.0"
-MAX_MESSAGE_CHARS = 4000
+REPORT_VIEW_VERSION = "1.2"
 _EXECUTED = {"passed", "failed", "error"}
 _TEMPLATE_VAR = re.compile(r"\$\{([^}]+)\}|:([A-Za-z_][A-Za-z0-9_]*)")
 
@@ -48,12 +47,10 @@ def _strings(value: Any) -> list[str]:
 
 
 def _display(value: Any) -> str:
+    """Format evidence without truncation, masking, hashing, or semantic rewriting."""
     if value is None:
         return "报文缺失"
-    text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) if isinstance(value, (dict, list)) else str(value)
-    if len(text) > MAX_MESSAGE_CHARS:
-        return text[:MAX_MESSAGE_CHARS] + f"\n…（已截断；原始长度 {len(text)} 字符，完整内容见证据文件）"
-    return text
+    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) if isinstance(value, (dict, list)) else str(value)
 
 
 def _normalized_path(value: Any) -> str | None:
@@ -131,21 +128,98 @@ def _safe_ref_candidates(root: Path, ref: str, known: list[Path]) -> list[Path]:
     return options
 
 
-def _assertion(item: dict[str, Any], evidence_ref: str | None) -> dict[str, Any]:
+_CHECKPOINT_LAYERS = ("http", "db", "cache", "mq", "log", "other")
+
+
+def _checkpoint_layer(item: dict[str, Any], source: str, evidence_ref: str | None) -> str:
+    explicit = item.get("validation_layer") or item.get("layer") or item.get("oracle_layer")
+    normalized = str(explicit or "").strip().lower()
+    aliases = {"database": "db", "sql": "db", "redis": "cache", "kafka": "mq", "rabbitmq": "mq", "logs": "log"}
+    normalized = aliases.get(normalized, normalized)
+    if normalized in _CHECKPOINT_LAYERS:
+        return normalized
+    text = " ".join(str(value) for value in (
+        item.get("type"), item.get("source"), item.get("name"), item.get("path"), source, evidence_ref,
+    ) if value).lower()
+    if re.search(r"\b(db|database|sql)\b|数据库", text):
+        return "db"
+    if re.search(r"\b(cache|redis)\b|缓存", text):
+        return "cache"
+    if re.search(r"\b(mq|kafka|rabbitmq)\b|消息队列", text):
+        return "mq"
+    if re.search(r"\b(log|logs)\b|日志", text):
+        return "log"
+    if re.search(r"\b(http|status|header|body|json|response|request)\b|响应|请求|业务码|状态码", text) or evidence_ref:
+        return "http"
+    return "other"
+
+
+def _assertion(item: dict[str, Any], evidence_ref: str | None, *, source: str = "结构化断言") -> dict[str, Any]:
     name = (
         item.get("name") or item.get("assertion_id") or item.get("id") or item.get("path")
         or item.get("source") or item.get("type") or "未命名检查项"
     )
     assertion_type = item.get("type") or item.get("operator") or item.get("source") or "未标注"
     actual = item.get("actual") if "actual" in item else item.get("observed")
+    resolved_ref = item.get("evidence_ref") or evidence_ref
     return {
         "name": str(name),
         "type": str(assertion_type),
         "expected": item.get("expected") if "expected" in item else None,
         "actual": actual,
         "status": item.get("status") or "未标注",
-        "evidence_ref": item.get("evidence_ref") or evidence_ref,
+        "evidence_ref": resolved_ref,
+        "source": source,
+        "layer": _checkpoint_layer(item, source, resolved_ref),
     }
+
+
+def _text_checkpoint(text: Any, evidence_ref: str | None, *, source: str, status: str = "未标注") -> dict[str, Any]:
+    item = {"name": str(text), "type": source}
+    return {
+        "name": str(text),
+        "type": source,
+        "expected": str(text) if source == "计划检查点" else None,
+        "actual": str(text) if source != "计划检查点" else None,
+        "status": status,
+        "evidence_ref": evidence_ref,
+        "source": source,
+        "layer": _checkpoint_layer(item, source, evidence_ref),
+    }
+
+
+def _shell_quote(value: Any) -> str:
+    return "'" + str(value).replace("'", "'\\''") + "'"
+
+
+def _request_url(request: dict[str, Any], fallback: Any = None) -> str:
+    raw = request.get("url") or request.get("path") or fallback or ""
+    query = request.get("query") if isinstance(request.get("query"), dict) else request.get("params")
+    if not isinstance(query, dict) or not query or "?" in str(raw):
+        return str(raw)
+    pairs: list[tuple[str, Any]] = []
+    for key, value in query.items():
+        if isinstance(value, list):
+            pairs.extend((str(key), item) for item in value)
+        elif value is not None:
+            pairs.append((str(key), value))
+    encoded = urlencode(pairs, doseq=True)
+    return str(raw) + (("?" + encoded) if encoded else "")
+
+
+def _request_curl(request: dict[str, Any], fallback: Any = None) -> str | None:
+    if not request:
+        return None
+    method = str(request.get("method") or "GET").upper()
+    parts = [f"curl -X {method} {_shell_quote(_request_url(request, fallback))}"]
+    headers = request.get("headers") if isinstance(request.get("headers"), dict) else {}
+    for key, value in headers.items():
+        parts.append(f"  -H {_shell_quote(f'{key}: {value}')}")
+    body = request.get("json") if "json" in request else request.get("body") if "body" in request else request.get("data")
+    if body is not None:
+        raw = body if isinstance(body, str) else json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        parts.append(f"  --data-raw {_shell_quote(raw)}")
+    return " \\\n".join(parts)
 
 
 def _exchange(item: Any, label: str, evidence_ref: str, planned: dict[str, str] | None) -> dict[str, Any] | None:
@@ -176,9 +250,44 @@ def _exchange(item: Any, label: str, evidence_ref: str, planned: dict[str, str] 
         "elapsed_ms": item.get("elapsed_ms"),
         "request": request_text,
         "response": response_text,
+        "request_data": request if request_present else None,
+        "response_data": response if response_present else None,
+        "curl": _request_curl(request, target) if request_present else None,
         "request_missing": not request_present,
         "response_missing": not response_present,
-        "truncated": "已截断" in request_text or "已截断" in response_text,
+        "truncated": False,
+        "evidence_ref": evidence_ref,
+    }
+
+
+def _step_exchange(step: Any, label: str, evidence_ref: str, planned: dict[str, str] | None) -> dict[str, Any] | None:
+    """Adapt evidence-schema ``steps[].request/response`` without losing fields."""
+    if not isinstance(step, dict):
+        return None
+    request = step.get("request") if isinstance(step.get("request"), dict) else None
+    response = step.get("response") if isinstance(step.get("response"), dict) else None
+    if request is None and response is None:
+        return None
+    request = request or {}
+    response = response or {}
+    method = request.get("method") or (planned or {}).get("method")
+    target = request.get("url") or request.get("path") or (planned or {}).get("path")
+    status = response.get("http_status") if "http_status" in response else response.get("status")
+    elapsed = response.get("elapsed_ms") if "elapsed_ms" in response else step.get("elapsed_ms")
+    return {
+        "label": label,
+        "method": str(method).upper() if method else None,
+        "path": _normalized_path(target),
+        "status": status,
+        "elapsed_ms": elapsed,
+        "request": _display(request) if request else "请求报文缺失",
+        "response": _display(response) if response else "响应报文缺失",
+        "request_data": request if request else None,
+        "response_data": response if response else None,
+        "curl": _request_curl(request, target) if request else None,
+        "request_missing": not bool(request),
+        "response_missing": not bool(response),
+        "truncated": False,
         "evidence_ref": evidence_ref,
     }
 
@@ -241,9 +350,22 @@ def build_report_view(manifest: dict[str, Any], base_dir: str | Path | None = No
     residual_risks: list[dict[str, Any]] = []
     planned_interface_keys: set[tuple[str, str]] = set()
     executed_interface_keys: set[tuple[str, str]] = set()
+    aggregation = manifest.get("aggregation") if isinstance(manifest.get("aggregation"), dict) else {}
+    current_cases = aggregation.get("current_cases")
+    if not isinstance(current_cases, dict):
+        current_cases = manifest.get("current_cases") if isinstance(manifest.get("current_cases"), dict) else None
+    current_case_sources = {
+        str(task_id): str(record.get("source_run_id"))
+        for task_id, record in (current_cases or {}).items()
+        if isinstance(record, dict) and record.get("source_run_id")
+    } if current_cases is not None else None
 
     for run in [item for item in _as_list(manifest.get("evidence_runs")) if isinstance(item, dict)]:
         run_id = str(run.get("id") or "未标注 Run")
+        current_run_case_ids = {
+            task_id for task_id, source_run_id in (current_case_sources or {}).items()
+            if source_run_id == run_id
+        } if current_case_sources is not None else None
         path_value = run.get("result_path")
         entry = {
             "id": run_id,
@@ -289,6 +411,8 @@ def build_report_view(manifest: dict[str, Any], base_dir: str | Path | None = No
             task_id = str(task.get("task_id") or task.get("case_id") or "")
             if not task_id:
                 continue
+            if current_run_case_ids is not None and task_id not in current_run_case_ids:
+                continue
             task_ids.add(task_id)
             record = records.get(task_id) or records.get(str(task.get("case_id") or "")) or {}
             case_id = str(task.get("case_id") or task_id)
@@ -311,9 +435,18 @@ def build_report_view(manifest: dict[str, Any], base_dir: str | Path | None = No
                 planned_interface_keys.add((request["method"], request["path"]))
             assertions: list[dict[str, Any]] = []
             exchanges: list[dict[str, Any]] = []
+            plan_assertions = [item for item in _as_list(task.get("assertions")) if isinstance(item, dict)]
+            assertions.extend(_assertion(item, None, source="计划检查点") for item in plan_assertions)
+            if task.get("assertion_summary"):
+                assertions.append(_text_checkpoint(task["assertion_summary"], None, source="计划检查点", status="planned"))
             for ref, payload, _ in payloads:
                 source_assertions = _as_list(payload.get("assertions")) or _as_list(payload.get("verification_assertions"))
-                assertions.extend(_assertion(item, ref) for item in source_assertions if isinstance(item, dict))
+                assertions.extend(_assertion(item, ref, source="执行断言") for item in source_assertions if isinstance(item, dict))
+                for check in _as_list(payload.get("checks")):
+                    if isinstance(check, dict):
+                        assertions.append(_assertion(check, ref, source="执行检查点"))
+                    elif check is not None and str(check).strip():
+                        assertions.append(_text_checkpoint(check, ref, source="执行检查说明", status=payload.get("status") or record.get("status") or "未标注"))
                 main = _exchange(payload.get("exchange"), "主请求", ref, planned[0] if planned else None)
                 verification = _exchange(
                     payload.get("verification_exchange"), "只读复核", ref,
@@ -328,15 +461,31 @@ def build_report_view(manifest: dict[str, Any], base_dir: str | Path | None = No
                     verification_plan = next((item for item in planned if item["role"] == "只读复核"), None)
                     if verification_plan:
                         executed_interface_keys.add((verification_plan["method"], verification_plan["path"]))
+                for index, step in enumerate(_as_list(payload.get("steps"))):
+                    exchange = _step_exchange(step, f"步骤 {index + 1}", ref, planned[0] if planned else None)
+                    if exchange:
+                        exchanges.append(exchange)
+                        if exchange.get("method") and exchange.get("path"):
+                            executed_interface_keys.add((exchange["method"], exchange["path"]))
+                if not _as_list(payload.get("steps")) and ("request" in payload or "response" in payload):
+                    exchange = _step_exchange(payload, "主请求", ref, planned[0] if planned else None)
+                    if exchange:
+                        exchanges.append(exchange)
+                        if exchange.get("method") and exchange.get("path"):
+                            executed_interface_keys.add((exchange["method"], exchange["path"]))
             if not assertions:
                 assertions.extend(
-                    _assertion(item, evidence_refs[0] if evidence_refs else None)
+                    _assertion(item, evidence_refs[0] if evidence_refs else None, source="结果断言")
                     for item in _as_list(record.get("assertions")) if isinstance(item, dict)
                 )
             scenario_key, scenario_name, scenario_source = _scenario_identity(task, acceptance)
             ac_refs = _unique_strings(
                 _strings(task.get("acceptance_refs")) + _strings(task.get("requirement_refs"))
             )
+            checkpoints_by_layer = {
+                layer: [checkpoint for checkpoint in assertions if checkpoint.get("layer") == layer]
+                for layer in _CHECKPOINT_LAYERS
+            }
             cases.append({
                 "id": case_id,
                 "task_id": task_id,
@@ -352,9 +501,11 @@ def build_report_view(manifest: dict[str, Any], base_dir: str | Path | None = No
                 "path": planned[0]["path"] if planned else None,
                 "planned_requests": planned,
                 "assertions": assertions,
+                "checkpoints": assertions,
+                "checkpoints_by_layer": checkpoints_by_layer,
                 "exchanges": exchanges,
                 "evidence_refs": evidence_refs,
-                "evidence_note": None if assertions else "无结构化检查项明细",
+                "evidence_note": None if assertions else "无计划检查点、结构化断言或执行检查说明",
             })
 
         for candidate in known_evidence:
@@ -405,7 +556,13 @@ def build_report_view(manifest: dict[str, Any], base_dir: str | Path | None = No
     for item in acceptance_items:
         ac_id = str(item.get("id") or "")
         related = [scenario["name"] for scenario in scenarios if ac_id in scenario["acceptance_refs"]]
-        coverage_items.append({**item, "scenarios": _unique_strings(related)})
+        closure = str(item.get("interface_verifiability") or "partial").lower()
+        closure = closure if closure in {"direct", "partial", "none"} else "partial"
+        coverage_items.append({**item, "interface_closure": closure, "scenarios": _unique_strings(related)})
+    coverage_groups = [
+        {"id": key, "items": [item for item in coverage_items if item["interface_closure"] == key]}
+        for key in ("direct", "partial", "none")
+    ]
 
     interface_map: dict[tuple[str, str], dict[str, Any]] = {}
     for case in cases:
@@ -474,7 +631,7 @@ def build_report_view(manifest: dict[str, Any], base_dir: str | Path | None = No
     return {
         "report_view_version": REPORT_VIEW_VERSION,
         "summary": summary,
-        "coverage": {"items": coverage_items, "total": total},
+        "coverage": {"items": coverage_items, "groups": coverage_groups, "total": total},
         "interfaces": interfaces,
         "scenarios": scenarios,
         "issues": defects,

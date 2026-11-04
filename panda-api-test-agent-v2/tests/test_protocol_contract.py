@@ -8,6 +8,8 @@ sys.path.insert(0, str(SKILL_DIR / "scripts"))
 from protocol_contract import (
     build_user_decision,
     normalize_artifact_metadata,
+    evaluate_evidence_closure,
+    normalize_evidence_fact,
     normalize_fact_decision,
     normalize_review,
     normalize_scan_fact,
@@ -38,6 +40,56 @@ class ProtocolContractTests(unittest.TestCase):
         self.assertEqual(decision["subject"]["plan_fingerprint"], "sha256:p")
         self.assertEqual(decision["decision"]["approved_case_ids"], ["C1"])
         self.assertEqual(decision["source"]["message_id"], "MSG-1")
+
+    def test_evidence_closure_continues_when_safe_action_exists(self):
+        result = evaluate_evidence_closure(
+            [{
+                "fact_id": "FACT-REQ",
+                "status": "unavailable",
+                "checked_sources": [{"source_id": "provided-url", "status": "unavailable"}],
+                "blocking_scope": {"stage": "requirement_mapping"},
+            }],
+            candidate_actions=[{"action": "inspect_local_contract", "available": True, "safe": True, "valuable": True}],
+        )
+        self.assertEqual(result["decision_state"], "FACT_GATHERING")
+        self.assertEqual(result["next_action"], "inspect_local_contract")
+        self.assertIsNone(result["stop_proof"])
+
+    def test_unchecked_fact_cannot_become_user_block(self):
+        result = evaluate_evidence_closure([{"fact_id": "FACT-AC", "status": "not_checked"}])
+        self.assertEqual(result["decision_state"], "FACT_GATHERING")
+        self.assertEqual(result["next_action"], "inspect_unchecked_evidence")
+
+    def test_stop_proof_requires_exhausted_safe_actions(self):
+        result = evaluate_evidence_closure(
+            [{
+                "fact_id": "FACT-AC",
+                "status": "unavailable",
+                "checked_sources": [{"source_id": "source-a", "status": "unavailable"}],
+                "user_input": {"kind": "requirement_fact", "one_of": ["prd", "contract"]},
+                "resume_from": "requirement_mapping",
+            }],
+            candidate_actions=[{"action": "unauthorized-source", "available": False, "safe": False}],
+        )
+        self.assertEqual(result["decision_state"], "BLOCKED_USER")
+        self.assertEqual(result["stop_proof"]["missing_fact_ids"], ["FACT-AC"])
+        self.assertEqual(result["stop_proof"]["resume_from"], ["requirement_mapping"])
+
+    def test_degraded_ready_preserves_unresolved_facts(self):
+        result = evaluate_evidence_closure(
+            [{
+                "fact_id": "FACT-AC",
+                "status": "insufficient",
+                "checked_sources": [{"source_id": "contract", "status": "insufficient"}],
+            }],
+            degraded_scope=["interface_level_design"],
+        )
+        self.assertEqual(result["decision_state"], "DEGRADED_READY")
+        self.assertEqual(result["unresolved_fact_ids"], ["FACT-AC"])
+
+    def test_unavailable_fact_requires_checked_source(self):
+        with self.assertRaisesRegex(ValueError, "checked_sources"):
+            normalize_evidence_fact({"fact_id": "FACT-1", "status": "unavailable"})
 
     def test_scan_fact_remains_candidate_and_keeps_traceability(self):
         fact = normalize_scan_fact({"category": "source", "subject": {"method": "POST", "path": "/orders"}}, scan_id="SCAN-1", baseline={"commit": "abc"})

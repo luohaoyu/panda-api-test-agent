@@ -249,12 +249,33 @@ def _merge_external_evidence(records: list[dict[str, Any]], supplied: dict[str, 
     return chosen
 
 
+def _previous_aggregation(previous_manifest: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(previous_manifest, dict):
+        return {}
+    aggregation = previous_manifest.get("aggregation")
+    return aggregation if isinstance(aggregation, dict) else previous_manifest
+
+
+def validate_run_records_requirement(requirement_id: str, run_records: Iterable[dict[str, Any]]) -> None:
+    """Reject missing or foreign requirement identities before aggregation."""
+    for index, record in enumerate(run_records):
+        if not isinstance(record, dict):
+            raise ValueError(f"run_records[{index}] must be an object")
+        actual = record.get("requirement_id")
+        if actual != requirement_id:
+            raise ValueError(
+                f"run_records[{index}] requirement_id mismatch: expected {requirement_id!r}, got {actual!r}"
+            )
+
+
 def aggregate_requirement_current(requirement_id: str, run_records: list[dict[str, Any]], *, previous_manifest: dict[str, Any] | None = None, external_evidence: dict[str, Any] | None = None) -> dict[str, Any]:
     """Create one current projection while preserving every historical run."""
-    records = [record for record in run_records if record.get("requirement_id") in {None, requirement_id}]
+    validate_run_records_requirement(requirement_id, run_records)
+    previous = _previous_aggregation(previous_manifest)
+    records = list(run_records)
     records.sort(key=lambda item: (item.get("sequence", 0), item.get("run_id", "")))
     authoritative = [record for record in records if record.get("authoritative")]
-    current_cases = copy.deepcopy((previous_manifest or {}).get("current_cases") or {})
+    current_cases = copy.deepcopy(previous.get("current_cases") or {})
     for record in authoritative:
         for task in record.get("task_results") or []:
             if task.get("status") == "not_run":
@@ -305,7 +326,7 @@ def aggregate_requirement_current(requirement_id: str, run_records: list[dict[st
     if current_status == "passed" and status_reasons:
         # A case-level pass cannot be stronger than the run that produced it.
         current_status = "blocked" if {"cleanup_blocked", "blocking_gap"} & set(status_reasons) else "inconclusive"
-    defects = reconcile_defects((previous_manifest or {}).get("defects") or [], records)
+    defects = reconcile_defects(previous.get("defects") or [], records)
     return {
         "schema_version": "1.1",
         "requirement_id": requirement_id,

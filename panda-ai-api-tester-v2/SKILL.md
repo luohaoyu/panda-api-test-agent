@@ -110,8 +110,8 @@ docs/
 ## 核心流程
 
 1. **REQUIREMENT**：绑定当前工作区、项目标识、需求 ID、运行边界和输出目录；提取 AC、业务规则、风险与专项限制。
-2. **CASE DESIGN**：先从需求/AC/业务规则设计候选用例。候选用例描述验证目标、业务前置状态、请求、断言和 Oracle；不得因尚无真实数据就省略用例，也不得把候选用例称为已可执行。
-3. **FEASIBILITY / DATA PLAN**：逐条分析候选用例的数据、凭证、环境、fixture、Oracle 和 cleanup 依赖，生成 `coverage_map` 与 `dependency_matrix`。每条候选用例必须显式声明 `execution_dependencies`；无额外依赖时写空数组。缺少数据或执行事实时记录 `status=blocked`、`known_gap`、责任人和下一步，但规划必须继续完成；此时门禁为 `pending_review`，不得把数据缺口误报为流程失败。
+2. **CASE DESIGN**：先从需求/AC/业务规则设计完整候选用例。候选用例描述验证目标、业务前置状态、请求、断言和 Oracle；不得因尚无真实数据、凭证、fixture、运行时 Oracle 或 cleanup 而省略、合并或弱化用例，也不得把候选用例称为已可执行。不得用时间预算或固定数量上限裁剪 coverage obligations 或候选用例。完整业务语义设计只生成一次；后续覆盖矩阵、可行性计划、审核视图和执行计划基于该设计做结构化转换，不得分别重新进行业务语义设计。
+3. **FEASIBILITY / DATA PLAN**：逐条分析候选用例的数据、凭证、环境、fixture、Oracle 和 cleanup 依赖，生成 `coverage_map` 与 `dependency_matrix`。每条候选用例必须显式声明 `execution_dependencies`；无额外依赖时写空数组。每个依赖都必须经过“定义最小事实 → 检查相关来源 → 记录事实状态和证据 → 判断是否足以 resolved/not_required → 继续定向取证或停止 → blocked/known gap”的最小证据闭环；`not_checked` 不得直接判为 `blocked`，`resolved` 必须有 evidence_refs，`blocked` 必须有已查来源、具体缺失事实、停止理由和下一步。缺少数据或执行事实时记录 `status=blocked`、责任人和下一步，但规划必须继续完成；此时门禁为 `pending_review`，不得把数据缺口误报为流程失败，也不得反向删除或改写已经完成的候选设计。依赖已足以判定后不得继续查无关来源，除非新来源可能改变状态、安全判断或批准范围。
 4. **HUMAN REVIEW**：向审核人提交完整候选范围、依赖矩阵和覆盖边界。审核人决定全量批准、只批准依赖已闭合的子集、暂缓部分用例、驳回或要求补充。审核范围外用例保留为 `not_run`/未覆盖边界，不得静默删除。
 5. **FINAL GATE-FEASIBILITY**：在任何 RuntimeContext、Secret envelope、fixture 或 HTTP 之前，按人工审核批准范围计算最终静态门禁。只有批准范围仍包含 `candidate_only`、未声明依赖、未解决依赖、未知 case 依赖或依赖环时，才停止在 Package Build 前。若人工只批准依赖已闭合的子集，则门禁通过并继续该子集，但不得宣称完整需求通过。
 6. **PACKAGE BUILD**：只有人工审核完成且最终门禁通过后，才调用 `compile_approved_package(..., feasibility_plan=plan)` 构建 TestPackage 2.2，并绑定配置 revision、画像身份、审核范围、可行性快照及源指纹。既有 2.1 包只做兼容执行；新包不得降级到 2.1 绕过规划、审核或门禁。
@@ -123,7 +123,7 @@ docs/
 
 ## 候选用例与 TestPackage 要求
 
-候选用例先于 FeasibilityPlan，FeasibilityPlan 先于人工审核，人工审核先于最终 TestPackage。不得颠倒为“先有 PLAN 再设计用例”，不得在数据规划阶段因缺少真实数据而停止流程，也不得跳过规划或人工审核直接建包。
+候选用例先于 FeasibilityPlan，FeasibilityPlan 先于人工审核，人工审核先于最终 TestPackage。不得颠倒为“先有 PLAN 再设计用例”，不得在数据规划阶段因缺少真实数据而停止流程，也不得跳过规划或人工审核直接建包。设计阶段只回答“应该测什么”，可行性阶段只回答“现在能测什么”：`candidate_case_ids` 的完整性不得受 `ready_case_ids`、`blocked_case_ids` 或本轮执行范围影响。
 
 每条进入批准范围的候选用例至少声明：
 

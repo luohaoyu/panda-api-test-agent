@@ -66,6 +66,8 @@ def _documented_review(intent, status="approved", **overrides):
         "review_id": "REVIEW-DOC-1",
         "design_fingerprint": plan["plan_fingerprint"],
         "reviewer": "user",
+        "review_source": "host_user_interaction",
+        "interaction_id": "interaction-review-doc-1",
         "reviewed_at": "2026-11-02T00:00:00+08:00",
         "approved_case_ids": case_ids,
         "execution_case_ids": case_ids,
@@ -99,12 +101,13 @@ class DocumentedReviewContractTests(unittest.TestCase):
     def test_documented_envelope_compiles_a_run(self):
         intent = _intent()
         review, plan, case_ids = _documented_review(intent)
-        intent["review"] = review
         root = Path(tempfile.mkdtemp()) / "RUN-DOC"
-        created = compile_and_create_run(intent, root, run_id="RUN-DOC")
-        self.assertEqual(created["next_action"]["action"], "request_execution_approval")
+        compile_and_create_run(intent, root, run_id="RUN-DOC")
+        decision = record_review(root, review)
+        self.assertEqual(decision["next_action"], "request_execution_approval")
         _authorize(root, case_ids, "AUTH-DOC")
         self.assertEqual(next_action(root)["action"], "execute_slice")
+        created = {"review": json.loads((root / "state.json").read_text(encoding="utf-8"))["review"]}
         self.assertEqual(created["review"]["approved_at"], "2026-11-02T00:00:00+08:00")
         self.assertEqual(created["review"]["approval_field_source"], "reviewed_at")
         self.assertEqual(created["review"]["fingerprint_source"], "design_fingerprint")
@@ -176,6 +179,15 @@ class ApprovalWriteBackTests(unittest.TestCase):
         root = Path(tempfile.mkdtemp()) / run_id
         compile_and_create_run(intent, root, run_id=run_id)
         return intent, root
+
+    def test_executable_review_without_host_provenance_is_rejected(self):
+        intent, root = self._pending_run("RUN-WB-NO-PROVENANCE")
+        review, _, _ = _documented_review(intent)
+        review.pop("review_source")
+        review.pop("interaction_id")
+        with self.assertRaisesRegex(OrchestrationError, "REVIEW_SOURCE_REQUIRED"):
+            record_review(root, review)
+        self.assertEqual(next_action(root)["action"], "request_plan_review")
 
     def test_approval_unlocks_the_same_run(self):
         intent, root = self._pending_run()

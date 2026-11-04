@@ -26,9 +26,29 @@ ARTIFACT_SCHEMAS = {
     "user_decision": "1.0",
 }
 REVIEW_STATUSES = {"pending_review", "approved", "partially_approved", "rejected", "plan_only", "expired", "superseded"}
-FACT_STATUSES = {"candidate", "confirmed", "rejected", "needs_reviewer", "superseded"}
+FACT_STATUSES = {
+    "candidate",
+    "confirmed",
+    "insufficient",
+    "conflicted",
+    "unavailable",
+    "not_checked",
+    "not_applicable",
+    "rejected",
+    "needs_reviewer",
+    "superseded",
+}
 FACT_DECISION_STATUSES = {"confirmed", "rejected", "needs_reviewer", "superseded"}
 FACT_DECISION_OWNERS = {"ai_skill", "reviewer"}
+DECISION_STATES = {
+    "FACT_GATHERING",
+    "READY",
+    "DEGRADED_READY",
+    "PENDING_REVIEW",
+    "BLOCKED_USER",
+    "TERMINAL",
+}
+_RESOLVED_EVIDENCE_STATUSES = {"confirmed", "not_applicable"}
 
 
 def _canonical(value: Any) -> str:
@@ -197,6 +217,121 @@ def require_confirmed_facts(refs: list[dict[str, Any]], *, context: str = "artif
         elif status != "confirmed":
             errors.append(f"{context}: fact {ref.get('fact_id')} is {status}, confirmed is required")
     return errors
+
+
+def normalize_evidence_fact(fact: dict[str, Any]) -> dict[str, Any]:
+    """Normalize one generic evidence fact without binding it to a source type.
+
+    This is a decision envelope, not a second project fact ledger. ``evidence_refs``
+    must point to the owning source or immutable evidence; Secret values and raw
+    reasoning are never copied into this envelope.
+    """
+    if not isinstance(fact, dict):
+        raise ValueError("evidence fact must be an object")
+    fact_id = fact.get("fact_id")
+    if not isinstance(fact_id, str) or not fact_id.strip():
+        raise ValueError("evidence fact requires fact_id")
+    status = fact.get("status") or "not_checked"
+    if status not in FACT_STATUSES:
+        raise ValueError(f"unsupported evidence fact status: {status!r}")
+    refs = [item.strip() for item in fact.get("evidence_refs") or [] if isinstance(item, str) and item.strip()]
+    checked_sources = []
+    for source in fact.get("checked_sources") or []:
+        if not isinstance(source, dict) or not isinstance(source.get("source_id"), str) or not source["source_id"].strip():
+            raise ValueError("checked_sources entries require source_id")
+        source_status = source.get("status")
+        if source_status not in {"confirmed", "insufficient", "conflicted", "unavailable", "not_applicable"}:
+            raise ValueError(f"checked source cannot use status: {source_status!r}")
+        checked_sources.append({
+            "source_id": source["source_id"].strip(),
+            "status": source_status,
+            "evidence_refs": [item.strip() for item in source.get("evidence_refs") or [] if isinstance(item, str) and item.strip()],
+        })
+    if status == "confirmed" and not refs:
+        raise ValueError("confirmed evidence fact requires evidence_refs")
+    if status == "unavailable" and not checked_sources:
+        raise ValueError("unavailable evidence fact requires checked_sources")
+    return {
+        "fact_id": fact_id.strip(),
+        "subject": copy.deepcopy(fact.get("subject")),
+        "status": status,
+        "confidence": fact.get("confidence") or ("confirmed" if status == "confirmed" else "unconfirmed"),
+        "required_for": list(dict.fromkeys(item for item in fact.get("required_for") or [] if isinstance(item, str) and item)),
+        "blocking_scope": copy.deepcopy(fact.get("blocking_scope") or {}),
+        "evidence_refs": refs,
+        "checked_sources": checked_sources,
+        "user_input": copy.deepcopy(fact.get("user_input") or {}),
+        "resume_from": fact.get("resume_from"),
+    }
+
+
+def evaluate_evidence_closure(
+    facts: list[dict[str, Any]],
+    *,
+    candidate_actions: list[dict[str, Any]] | None = None,
+    degraded_scope: list[str] | None = None,
+) -> dict[str, Any]:
+    """Choose the next generic decision state from evidence and safe actions.
+
+    The evaluator never executes an action and never grants test permission. It
+    only prevents a failed source from being mistaken for a global terminal state.
+    """
+    normalized = [normalize_evidence_fact(item) for item in facts or []]
+    unresolved = [item for item in normalized if item["status"] not in _RESOLVED_EVIDENCE_STATUSES]
+    actions = [copy.deepcopy(item) for item in candidate_actions or [] if isinstance(item, dict)]
+    safe_actions = [
+        item for item in actions
+        if item.get("available") is True
+        and item.get("safe") is True
+        and item.get("valuable") is not False
+        and item.get("requires_user") is not True
+    ]
+    if not unresolved:
+        state = "READY"
+        next_action = "advance_stage"
+        stop_proof = None
+    elif safe_actions:
+        state = "FACT_GATHERING"
+        next_action = safe_actions[0].get("action") or safe_actions[0].get("action_id") or "continue_evidence_gathering"
+        stop_proof = None
+    elif degraded_scope:
+        state = "DEGRADED_READY"
+        next_action = "advance_with_declared_limits"
+        stop_proof = None
+    else:
+        unchecked = [item["fact_id"] for item in unresolved if item["status"] == "not_checked"]
+        if unchecked:
+            state = "FACT_GATHERING"
+            next_action = "inspect_unchecked_evidence"
+            stop_proof = None
+        else:
+            state = "BLOCKED_USER"
+            next_action = "request_minimum_user_input"
+            stop_proof = {
+                "missing_fact_ids": [item["fact_id"] for item in unresolved],
+                "checked_sources": {
+                    item["fact_id"]: [source["source_id"] for source in item["checked_sources"]]
+                    for item in unresolved
+                },
+                "exhausted_actions": [
+                    item.get("action") or item.get("action_id")
+                    for item in actions
+                    if item.get("available") is not True or item.get("safe") is not True
+                ],
+                "minimum_user_inputs": [
+                    item["user_input"] for item in unresolved if item.get("user_input")
+                ],
+                "resume_from": list(dict.fromkeys(item.get("resume_from") for item in unresolved if item.get("resume_from"))),
+            }
+    return {
+        "schema_version": "1.0",
+        "decision_state": state,
+        "facts": normalized,
+        "unresolved_fact_ids": [item["fact_id"] for item in unresolved],
+        "degraded_scope": list(dict.fromkeys(degraded_scope or [])),
+        "next_action": next_action,
+        "stop_proof": stop_proof,
+    }
 
 
 def result_verdict_to_requirement_status(verdict: str, *, api_verifiability: str = "direct", external_evidence_status: str = "complete") -> str:
